@@ -20,16 +20,19 @@
   # OUTPUTS A CONSUMER USES
   # ==========================================================================
   #
-  #   nixosModules.default      every server-side module; inert until a
-  #                             services.open-slop.* option enables something
+  #   overlays.default            pkgs.open-slop.{llmq,catalogue,
+  #                               llama-cpp-prismml,bonsai,grace}
+  #   nixosModules.default        every server-side module; inert until a
+  #                               services.open-slop.* option enables something
   #   homeManagerModules.default  programs.llmq
-  #   overlays.default          pkgs.open-slop.{llmq,catalogue,llama-cpp-prismml,
-  #                             bonsai,grace}
-  #   lib.catalogue             the catalogue as data, for a consumer that
-  #                             wants to read it at eval time
+  #   lib.catalogue               the catalogue as data
   #
-  # The modules apply the overlay themselves, so a consumer imports a module
-  # and sets options; it does not wire overlays.
+  # THE CONSUMER ADDS THE OVERLAY. The modules do not set nixpkgs.overlays
+  # themselves: a home-manager configuration running with useGlobalPkgs
+  # rejects nixpkgs.overlays from a module, and the same overlay set twice
+  # (once by a module, once by the consumer) would apply it twice. So the
+  # contract is two lines: add overlays.default to the package set, import
+  # the modules.
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -56,8 +59,8 @@
     let
       compiler = "ghc96";
 
-      # The overlay is defined once, outside eachDefaultSystem, so the
-      # NixOS and home-manager modules can apply it on any system.
+      # Defined once, outside eachDefaultSystem, so a consumer can apply it
+      # on any system.
       overlay =
         final: prev:
         let
@@ -92,12 +95,6 @@
             bonsai = final.callPackage ./nix/packages/bonsai-weights.nix { };
           };
         };
-
-      withOverlay =
-        { ... }:
-        {
-          nixpkgs.overlays = [ overlay ];
-        };
     in
     {
       overlays.default = overlay;
@@ -111,7 +108,6 @@
         catalogue-check = ./nix/modules/catalogue-check.nix;
         default = {
           imports = [
-            withOverlay
             ./nix/modules/options.nix
             ./nix/modules/server.nix
             ./nix/modules/pinned.nix
@@ -122,12 +118,7 @@
         };
       };
 
-      homeManagerModules.default = {
-        imports = [
-          withOverlay
-          ./nix/modules/client.nix
-        ];
-      };
+      homeManagerModules.default = ./nix/modules/client.nix;
 
       lib.catalogue = import ./catalogue;
     }
@@ -159,8 +150,8 @@
             program = "${pkgs.open-slop.llmq}/bin/llmq";
           };
 
-          # Regenerates nix/open-slop.nix from haskell/open-slop.cabal. Run after
-          # editing the cabal file; commit the result.
+          # Regenerates nix/open-slop.nix from haskell/open-slop.cabal. Run
+          # after editing the cabal file; commit the result.
           cabal2nix = {
             type = "app";
             program = toString (
@@ -201,4 +192,4 @@
         };
       }
     );
-  }
+}
