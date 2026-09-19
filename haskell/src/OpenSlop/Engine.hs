@@ -1,7 +1,8 @@
 -- | What each server dialect accepts and what it answers.
 --
 -- A 'Request' is built per engine, so an option that one server would answer
--- 500 to cannot be sent to it: 'HailoOllama' has no options field to fill.
+-- 500 to cannot be sent to it: 'HailoGenerate' has a field for num_predict
+-- and nothing else, because nothing else has been tried against it.
 -- A 'Reply' is one parsed line of the response, and 'Summary' is what a
 -- finished exchange is reduced to, in engine-neutral terms.
 module OpenSlop.Engine
@@ -54,9 +55,10 @@ data Sampling = Sampling
 data Request
   = OllamaGenerate Text Prompt Sampling Bool
   -- ^ model, prompt, sampling, stream
-  | HailoGenerate Text Prompt
-  -- ^ model, prompt, stream:false. Nothing else is verified against
-  -- hailo-ollama, and unrecognised fields have produced a 500.
+  | HailoGenerate Text Prompt Int Bool
+  -- ^ model, prompt, num_predict, stream. Measured 2026-09-19: hailo-ollama
+  -- 5.1.1 streams in ollama's line shape and honours options.num_predict.
+  -- No other option has been tried, so no other option has a field here.
   | LlamaCompletion Prompt Sampling Bool
   -- ^ llama-server's native /completion. One model per server, so no model
   -- field; its context is fixed at start, so ctx is not sent.
@@ -71,7 +73,7 @@ joinedNoInstruction p = T.intercalate "\n\n" (filter (not . T.null) [p.header, p
 buildRequest :: Engine -> Text -> Prompt -> Sampling -> Bool -> Request
 buildRequest engine model prompt sampling stream = case engine of
   Ollama -> OllamaGenerate model prompt sampling stream
-  HailoOllama -> HailoGenerate model prompt
+  HailoOllama -> HailoGenerate model prompt sampling.predict stream
   LlamaServer -> LlamaCompletion prompt sampling stream
 
 requestPath :: Request -> ByteString
@@ -98,8 +100,13 @@ instance ToJSON Request where
           ]
             <> ["system" .= prompt.instruction | not (T.null prompt.instruction)]
         )
-    HailoGenerate model prompt ->
-      object ["model" .= model, "prompt" .= joined prompt, "stream" .= False]
+    HailoGenerate model prompt predict stream ->
+      object
+        [ "model" .= model
+        , "prompt" .= joined prompt
+        , "stream" .= stream
+        , "options" .= object ["num_predict" .= predict]
+        ]
     LlamaCompletion prompt sampling stream ->
       object
         ( [ "prompt" .= joined prompt
@@ -132,8 +139,8 @@ data FinalInfo = FinalInfo
   }
   deriving stock (Show, Eq)
 
--- | Parse one response line. Handles ollama's NDJSON, hailo-ollama's single
--- object, and llama-server's SSE ("data: {...}") or plain JSON.
+-- | Parse one response line. Handles ollama's NDJSON, hailo-ollama's lines
+-- of the same shape, and llama-server's SSE ("data: {...}") or plain JSON.
 parseReply :: Engine -> ByteString -> Maybe Reply
 parseReply engine raw0 = do
   let raw = fromMaybe raw0 (B.stripPrefix "data: " raw0)

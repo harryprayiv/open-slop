@@ -36,8 +36,9 @@
 #                   wrong figure is visible after the first one.
 #   tokPerSec       generation rate MEASURED on oracle, or null. Never a vendor
 #                   figure. docs/hailo.md section 14 holds the measurements.
-#   docFit          "best", "usable", "poor" or "unsuitable", for turning long
-#                   source text into reference documentation specifically.
+#   docFit          "best", "usable", "poor", "unsuitable" or "unknown", for
+#                   turning long source text into reference documentation
+#                   specifically.
 #
 # A model entry may override ctx and predict. Everything else is per backend.
 #
@@ -95,19 +96,21 @@
       # server where it was, so nix/modules/catalogue-check.nix pins it.
       port = 8000;
 
-      # [?] Neither is verified against hailo-ollama 5.1.1. Unrecognised
-      # request fields have been reported to produce a 500 from it, so llmq
-      # sends the one shape known to work here: model, prompt, stream false.
-      # Before flipping either, send oracle a request carrying the field and
-      # check that it answers with text rather than a 500.
-      streams = false;
-      acceptsOptions = false;
+      # Both verified against hailo-ollama 5.1.1 on 2026-09-19. Streaming
+      # lines have ollama's shape (response, done); the final line carries
+      # done_reason, total_duration and eval_count, and NO prompt_eval_count
+      # and no eval_duration. options.num_predict is honoured. Nothing else
+      # in options has been tried; llmq sends only num_predict.
+      streams = true;
+      acceptsOptions = true;
 
-      # [?] The context is compiled into each HEF and cannot be requested.
-      # 2048 is the figure a third-party server on the same 5.1.1 runtime
-      # reports for a Qwen2-1.5B HEF. Not measured here. predict is a
-      # reservation only: nothing is sent, and the server's own output cap is
-      # unknown.
+      # MEASURED 2026-09-19 on qwen2.5-instruct:1.5b, prompts of N "apple "
+      # tokens plus a short instruction: an answer at 1900, garbage with
+      # HTTP 200 at 2100, HTTP 500 with a text body at 4000. So the window
+      # is 2048, overflow is SILENT up to some larger size, and the server
+      # reports no prompt token count that would let llmq notice. The byte
+      # budget below is the only protection on this backend, which is why
+      # it stays at about half the window.
       ctx = 2048;
       predict = 768;
       promptOverhead = 256;
@@ -120,12 +123,14 @@
         request. Upstream weight licences vary per model; the HEFs themselves
         ship in Hailo's proprietary zoo.
 
-        No streaming and no request options are sent, because neither is
-        verified against this server. llmq shows elapsed time while it waits.
+        Streams like ollama and honours num_predict. Reports no prompt token
+        count, so an overflowing prompt cannot be detected: measured, a
+        prompt past the 2048-token window comes back as garbage with HTTP
+        200. The byte budget is the only guard, and it is set at half the
+        window for that reason.
 
-        The assumed 2048-token window leaves under 3 KB of input per request.
-        Long text becomes hundreds of small parts, each written with no view of
-        the others.
+        Under 3 KB of input per request. Long text becomes hundreds of small
+        parts, each written with no view of the others.
       '';
     };
 
@@ -195,9 +200,10 @@
 
     cpu = {
       "qwen2.5-coder:7b" = {
-        summary = "code-tuned 7B, the best documentation model here";
+        summary = "code-tuned 7B, the best documentation model here, 2.0 tok/s";
         docFit = "best";
-        tokPerSec = null;
+        # 2026-09-19, one 19-token answer. A real figure needs a long output.
+        tokPerSec = 2.0;
         licence = "Apache-2.0";
         blurb = ''
           Qwen2.5-Coder 7B Instruct, Q4_K_M, about 4.7 GB resident.
@@ -208,8 +214,8 @@
           mistakes about type-level Haskell, PureScript rows and effects, and
           Nix module merge semantics. Check every claim it makes about a type.
 
-          Generation rate not measured here. Expect roughly the llama3.1:8b
-          figure; the two are close in size.
+          2.0 tok/s generation measured on one short answer, in line with
+          the llama3.1:8b figure; the two are close in size.
         '';
       };
 

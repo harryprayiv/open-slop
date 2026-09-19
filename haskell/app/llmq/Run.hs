@@ -61,7 +61,6 @@ data Common = Common
   , timeoutSeconds :: Int
   }
 
-
 data Outcome = Outcome
   { summary :: Summary
   , raw :: ByteString
@@ -69,8 +68,8 @@ data Outcome = Outcome
   , wallSeconds :: Int
   }
 
--- | Send one request. Streamed text is echoed to stderr as it arrives when
--- asked; the raw lines are kept for the failed/ directory.
+-- | Send one request under a ceiling. Streamed text is echoed to stderr as
+-- it arrives when asked; the raw lines are kept for the failed/ directory.
 send :: Client -> Auth -> Int -> Entry -> Request -> Bool -> IO Outcome
 send client auth limitSeconds e req echo = do
   rawRef <- newIORef []
@@ -105,6 +104,10 @@ problem e o
   | Just err <- o.summary.errorText = Just ("the server said: " <> err)
   | Just f <- o.failure = Just (describeFailure f)
   | B.null o.raw = Just "the server sent nothing"
+  -- Nothing parsed at all: hailo-ollama answers an oversized prompt with a
+  -- 500 whose body is plain text, and a proxy may answer with HTML.
+  | Nothing <- o.summary.final, T.null o.summary.output =
+      Just ("the response is not JSON: " <> T.take 300 (TE.decodeUtf8With TE.lenientDecode o.raw))
   | Nothing <- o.summary.final, e.streams = Just "the stream ended without its final line, so the part hit the timeout or the server went away"
   | Nothing <- o.summary.final = Just "the response has no final line"
   | T.null (T.strip o.summary.output) = Just "the model returned no text"
@@ -112,7 +115,6 @@ problem e o
 
 samplingFor :: Budget -> Sampling
 samplingFor b = Sampling {ctx = b.ctx, predict = b.predict, temperature = b.temperature, seed = Nothing}
-
 
 defaultInstruction :: Text
 defaultInstruction =
