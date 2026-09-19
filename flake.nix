@@ -168,9 +168,9 @@
                 set -euo pipefail
                 cd "$(git rev-parse --show-toplevel)"
                 ${pkgs.cabal2nix}/bin/cabal2nix ./haskell > nix/open-slop.nix.new
-                # cabal2nix writes src = ./.; this file lives one directory
-                # up from the cabal file.
-                sed -i 's|src = \./\.;|src = ../haskell;|' nix/open-slop.nix.new
+                # cabal2nix writes src = ./haskell (or ./. when run from inside
+                # it); this file lives in nix/, one directory over.
+                sed -i -E 's@src = \./(haskell|\.);@src = ../haskell;@' nix/open-slop.nix.new
                 mv nix/open-slop.nix.new nix/open-slop.nix
                 echo "wrote nix/open-slop.nix"
               ''

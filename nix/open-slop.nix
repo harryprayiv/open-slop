@@ -7,7 +7,7 @@
 mkDerivation {
   pname = "open-slop";
   version = "0.1.0.0";
-  src = ./haskell;
+  src = ../haskell;
   isLibrary = true;
   isExecutable = true;
   libraryHaskellDepends = [
