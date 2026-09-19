@@ -19,7 +19,7 @@
 -- so a crash before the rename leaves 'Pending' and the part runs again from
 -- the start. The id hashes model, budget, instruction and input, so the same
 -- command names the same job and a changed catalogue starts a new one.
-module open-slop.Job
+module OpenSlop.Job
   ( JobId (..)
   , Meta (..)
   , ManifestEntry (..)
@@ -47,9 +47,9 @@ import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, getCurrentTime)
 import GHC.Generics (Generic)
-import open-slop.Catalogue (Budget (..))
-import open-slop.Chunk (Part (..), chunk)
-import open-slop.Stats (Stats)
+import OpenSlop.Catalogue (Budget (..))
+import OpenSlop.Chunk (Part (..), chunk)
+import OpenSlop.Stats (Stats)
 import System.Directory
 import System.FileLock (SharedExclusive (Exclusive), tryLockFile, unlockFile)
 import System.FilePath ((</>))

@@ -6,11 +6,11 @@ license:            AGPL-3.0-or-later
 author:             Harry Pray IV
 maintainer:         harry@harryprayiv.com
 build-type:         Simple
-extra-doc-files:    README.md
 
 common shared
   default-language: GHC2021
   default-extensions:
+    BlockArguments
     DerivingStrategies
     DeriveAnyClass
     DuplicateRecordFields
@@ -37,12 +37,12 @@ library
   import:          shared
   hs-source-dirs:  src
   exposed-modules:
-    open-slop.Catalogue
-    open-slop.Chunk
-    open-slop.Engine
-    open-slop.Http
-    open-slop.Job
-    open-slop.Stats
+    OpenSlop.Catalogue
+    OpenSlop.Chunk
+    OpenSlop.Engine
+    OpenSlop.Http
+    OpenSlop.Job
+    OpenSlop.Stats
   build-depends:
     aeson >=2.1,
     bytestring,
@@ -54,6 +54,7 @@ library
     filepath,
     http-client,
     http-client-tls,
+    http-types,
     text,
     time
 

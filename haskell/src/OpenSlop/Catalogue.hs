@@ -4,7 +4,7 @@
 -- Nix owns the data (catalogue/default.nix) and hands it over as JSON. This
 -- module owns its meaning: what a window is, how a budget is derived from
 -- one, and which engine speaks to which backend. Nothing in here does IO.
-module open-slop.Catalogue
+module OpenSlop.Catalogue
   ( Engine (..)
   , Backend (..)
   , Model (..)
@@ -29,7 +29,7 @@ import Data.Text qualified as T
 import GHC.Generics (Generic)
 
 -- | The three server dialects the fleet speaks. Each constructor has its own
--- request shape and response shape in "open-slop.Engine"; a request for one
+-- request shape and response shape in "OpenSlop.Engine"; a request for one
 -- cannot be built for another.
 data Engine
   = Ollama

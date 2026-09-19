@@ -2,7 +2,7 @@ module Main (main) where
 
 import Data.Text (Text)
 import Data.Text qualified as T
-import open-slop.Chunk (Part (..), chunk, reassemble)
+import OpenSlop.Chunk (Part (..), chunk, reassemble)
 import Test.Tasty
 import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck

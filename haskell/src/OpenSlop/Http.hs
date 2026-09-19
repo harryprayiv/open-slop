@@ -5,7 +5,7 @@
 -- CPU prefill can be silent for many minutes and the caller's own ceiling
 -- decides when that becomes a failure. The connection has keepalive, which
 -- is what tells a dead server apart from a slow one.
-module open-slop.Http
+module OpenSlop.Http
   ( Client
   , newClient
   , Auth (..)

@@ -23,9 +23,9 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
-import open-slop.Catalogue
-import open-slop.Engine (ServedModel (..), parseTags, tagsPath)
-import open-slop.Http
+import OpenSlop.Catalogue
+import OpenSlop.Engine (ServedModel (..), parseTags, tagsPath)
+import OpenSlop.Http
 import System.Directory (createDirectoryIfMissing)
 import System.Environment (lookupEnv)
 import System.Exit

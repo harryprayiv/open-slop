@@ -26,12 +26,12 @@ import Data.Text.Encoding.Error qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Menu
-import open-slop.Catalogue
-import open-slop.Chunk (Part (..), chunk)
-import open-slop.Engine
-import open-slop.Http
-import open-slop.Job
-import open-slop.Stats (Stats (..), Verdict (..), judge)
+import OpenSlop.Catalogue
+import OpenSlop.Chunk (Part (..), chunk)
+import OpenSlop.Engine
+import OpenSlop.Http
+import OpenSlop.Job
+import OpenSlop.Stats (Stats (..), Verdict (..), judge)
 import System.Directory (doesFileExist, removePathForcibly)
 import System.Environment (lookupEnv)
 import System.Exit

@@ -1,10 +1,10 @@
 -- | llmq: send text to one model on one of the fleet's inference endpoints.
 --
--- The client side of open-slop. Picks a model, cuts long input into parts that
+-- The client side of OpenSlop. Picks a model, cuts long input into parts that
 -- fit its window, sends the parts one at a time, keeps each finished part on
 -- disk, and resumes at the first unfinished part when run again.
 --
--- The catalogue arrives as JSON in $SIBYL_CATALOGUE (Nix writes it from
+-- The catalogue arrives as JSON in $OPEN_SLOP_CATALOGUE (Nix writes it from
 -- catalogue/default.nix plus the consumer's endpoint options). Nothing here
 -- knows an address.
 --
@@ -23,11 +23,11 @@ import Menu
 import Options.Applicative hiding (header, info)
 import Options.Applicative qualified as O
 import Run
-import open-slop.Catalogue
-import open-slop.Engine (Prompt (..), Summary (..), buildRequest)
-import open-slop.Http
-import open-slop.Job
-import open-slop.Stats (Stats (..), Verdict (..), judge)
+import OpenSlop.Catalogue
+import OpenSlop.Engine (Prompt (..), Summary (..), buildRequest)
+import OpenSlop.Http
+import OpenSlop.Job
+import OpenSlop.Stats (Stats (..), Verdict (..), judge)
 import System.Directory (getHomeDirectory)
 import System.Environment (lookupEnv)
 import System.Exit
@@ -53,7 +53,7 @@ data AskOpts = AskOpts
 commonP :: Parser Common
 commonP =
   Common
-    <$> strOption (long "catalogue" <> metavar "FILE" <> help "catalogue JSON (default $SIBYL_CATALOGUE)" <> value "")
+    <$> strOption (long "catalogue" <> metavar "FILE" <> help "catalogue JSON (default $OPEN_SLOP_CATALOGUE)" <> value "")
     <*> strOption (long "state" <> short 's' <> metavar "DIR" <> help "job root (default $LLMQ_STATE, else ~/.local/state/llmq)" <> value "")
     <*> optional (strOption (long "key-file" <> metavar "FILE" <> help "bearer key for the gateway (default $LLMQ_KEY_FILE)"))
     <*> option auto (long "timeout" <> short 't' <> metavar "SECS" <> help "limitSeconds for one request" <> value 14400 <> showDefault)
@@ -148,7 +148,7 @@ fillDefaults :: Common -> IO Common
 fillDefaults c = do
   catFile <-
     if null c.catalogueFile
-      then lookupEnv "SIBYL_CATALOGUE" >>= maybe (die' "no catalogue: pass --catalogue or set SIBYL_CATALOGUE") pure
+      then lookupEnv "OPEN_SLOP_CATALOGUE" >>= maybe (die' "no catalogue: pass --catalogue or set OPEN_SLOP_CATALOGUE") pure
       else pure c.catalogueFile
   root <-
     if null c.stateRoot

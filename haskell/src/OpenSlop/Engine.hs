@@ -4,7 +4,7 @@
 -- 500 to cannot be sent to it: 'HailoOllama' has no options field to fill.
 -- A 'Reply' is one parsed line of the response, and 'Summary' is what a
 -- finished exchange is reduced to, in engine-neutral terms.
-module open-slop.Engine
+module OpenSlop.Engine
   ( Request (..)
   , Prompt (..)
   , Sampling (..)
@@ -30,7 +30,7 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
-import open-slop.Catalogue (Engine (..))
+import OpenSlop.Catalogue (Engine (..))
 
 -- | The instruction and the text, kept apart so an engine with a system
 -- field can use it and one without can join them.

@@ -3,7 +3,7 @@
 -- Two verdicts. 'Truncated' fails the part: the prompt filled the window,
 -- and ollama drops the FRONT of an oversized prompt, where the instruction
 -- is, then answers 200. Warnings keep the part and mark the job.
-module open-slop.Stats
+module OpenSlop.Stats
   ( Stats (..)
   , Verdict (..)
   , judge
@@ -14,8 +14,8 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
-import open-slop.Catalogue (Budget (..))
-import open-slop.Engine (FinalInfo (..))
+import OpenSlop.Catalogue (Budget (..))
+import OpenSlop.Engine (FinalInfo (..))
 
 data Stats = Stats
   { part :: Int

@@ -13,7 +13,7 @@
 -- safe direction for a budget. A piece cut (rule 3 on an oversized line) can
 -- land inside a multibyte character; the piece is then re-decoded leniently,
 -- so the broken sequence becomes U+FFFD in that part.
-module open-slop.Chunk
+module OpenSlop.Chunk
   ( Part (..)
   , chunk
   , reassemble
@@ -78,7 +78,7 @@ data Line = Line
 -- | Cut @input@ into parts of at most @budget@ bytes.
 chunk :: Int -> Text -> [Part]
 chunk budget input
-  | budget < 2 = error "open-slop.Chunk.chunk: budget must be at least 2"
+  | budget < 2 = error "OpenSlop.Chunk.chunk: budget must be at least 2"
   | otherwise = go 1 Nothing linesV
   where
     raw = BC.lines (TE.encodeUtf8 input)
