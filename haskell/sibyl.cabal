@@ -1,0 +1,91 @@
+cabal-version:      3.0
+name:               open-slop
+version:            0.1.0.0
+synopsis:           A Nix-configured local LLM machine: catalogue, engines, jobs, client
+license:            AGPL-3.0-or-later
+author:             Harry Pray IV
+maintainer:         harry@harryprayiv.com
+build-type:         Simple
+extra-doc-files:    README.md
+
+common shared
+  default-language: GHC2021
+  default-extensions:
+    DerivingStrategies
+    DeriveAnyClass
+    DuplicateRecordFields
+    LambdaCase
+    NamedFieldPuns
+    OverloadedRecordDot
+    OverloadedStrings
+    RecordWildCards
+    StrictData
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Widentities
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -Wmissing-export-lists
+    -Wredundant-constraints
+    -Wpartial-fields
+    -Wunused-packages
+  build-depends:
+    base >=4.16 && <5
+
+library
+  import:          shared
+  hs-source-dirs:  src
+  exposed-modules:
+    open-slop.Catalogue
+    open-slop.Chunk
+    open-slop.Engine
+    open-slop.Http
+    open-slop.Job
+    open-slop.Stats
+  build-depends:
+    aeson >=2.1,
+    bytestring,
+    containers,
+    cryptohash-sha256,
+    base16-bytestring,
+    directory,
+    filelock,
+    filepath,
+    http-client,
+    http-client-tls,
+    text,
+    time
+
+executable llmq
+  import:          shared
+  hs-source-dirs:  app/llmq
+  main-is:         Main.hs
+  other-modules:
+    Menu
+    Run
+  ghc-options:     -threaded -rtsopts
+  build-depends:
+    open-slop,
+    aeson,
+    bytestring,
+    containers,
+    directory,
+    filepath,
+    optparse-applicative,
+    text,
+    time,
+    typed-process,
+    unix
+
+test-suite open-slop-test
+  import:          shared
+  type:            exitcode-stdio-1.0
+  hs-source-dirs:  test
+  main-is:         Main.hs
+  build-depends:
+    open-slop,
+    tasty,
+    tasty-hunit,
+    tasty-quickcheck,
+    text
