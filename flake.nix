@@ -40,8 +40,8 @@
 
     grace = {
       url = "github:Gabriella439/grace";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
-
     llama-cpp-prismml = {
       url = "github:PrismML-Eng/llama.cpp";
       flake = false;
