@@ -44,7 +44,7 @@ in
     name = "Ternary-Bonsai-2-27B-PQ2_0.gguf";
     repo = "Ternary-Bonsai-2-27B-gguf";
     file = "Ternary-Bonsai-2-27B-PQ2_0.gguf";
-    hash = lib.fakeHash;
+    hash = "sha256-OQfcFljbH3ipgmv41by43GXbDUZjiJN69X8ilPrmLsE=";
     bytes = 7210000000;
     pack = "PQ2_0";
   };
