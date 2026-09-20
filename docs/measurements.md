@@ -5,19 +5,38 @@ Vendor figures do not go in this file.
 
 ## oracle: Raspberry Pi 5, 16 GB, four Cortex-A76
 
-### Inference
+### Rate against context, qwen2.5-coder:7b Q4_K_M on ollama, 2026-09-20
+
+Real llmq parts of the same input (modules/system/homebeacon, 31 KB, four
+files), the instruction included in the prompt count. Both rates fall as
+the prompt grows; prefill by 2.5x and decode by 3x across this range.
+
+| prompt tokens | prefill tok/s | decode tok/s | output tokens | wall | part |
+|---|---|---|---|---|---|
+| 853 | 13.5 | 1.7 | 361 | 271 s | genkey.nix alone |
+| 1259 | 10.0 | 1.6 | 343 | 335 s | responder.nix alone |
+| 2562 | 7.5 | 1.3 | 368 | 616 s | keycheck.nix alone |
+| 5064 | 6.4 | 0.9 | 630 | 1526 s | default.nix alone |
+| 8406 | 5.5 | 0.6 | 485 | 2399 s | all four files packed (documented one) |
+| 33 | not measured | 2.0 | 19 | | `llmq ask` |
+
+Per-file total for the four files: 2748 s, every file documented. Packed:
+2399 s, one file documented. Per-file is the default from this date.
+
+### Inference, other models
 
 | model | pack | prompt | pp tok/s | tg tok/s | command | date |
 |---|---|---|---|---|---|---|
-| qwen2.5-coder:7b (ollama) | Q4_K_M | 33 tokens | not measured | 2.0 | `llmq ask`, one 19-token answer | 2026-09-19 |
 | llama3.1:8b (ollama) | Q4_K_M | small | not measured | 1.7 | manual, docs/hailo.md | 2026-09-1x |
 | qwen2.5-instruct:1.5b (hailo) | int4 HEF | small | not measured | 6.1 to 6.5 | manual, docs/hailo.md | 2026-09-1x |
 | llama3.2:3b (hailo) | int4 HEF | small | not measured | 2.5 | manual, docs/hailo.md | 2026-09-1x |
-| bonsai-2-27b | PQ2_0 | 512 / 4096 / 16384 | | | `llama-bench -m <gguf> -t 4 -p 512,4096,16384 -n 128 -fa 1 -ngl 0` | |
-| bonsai-8b | Q2_0 | 512 / 4096 / 16384 | | | same | |
+| bonsai-2-27b (llama-server) | PQ2_0 | 128 / 64 | 0.98 | 0.66 | `llama-bench -t 4 -p 128 -n 0 -r 1` and `-p 0 -n 64 -r 1`; five reps of pp512 did not finish in 30 min | 2026-09-20 |
+| bonsai-8b (llama-server) | PQ2_0 | 128 / 64 | 4.62 | 3.60 | `llama-bench -t 4 -p 128 -n 64 -r 1 -fa 1 -ngl 0` | 2026-09-20 |
+| bonsai-8b (llama-server) | PQ2_0 | 8381-token part | 2.85 | 0.47 | llmq job, timed from the journal; output was untemplated garbage (engine bug, since fixed) but the rates stand | 2026-09-20 |
+| bonsai-8b (llama-server) | PQ2_0 | 22 tokens | | 3.6 | `llmq ask`, through /apply-template | 2026-09-20 |
 
-The Bonsai rows decide the catalogue's llamacpp budgets and whether the ollama
-7-8B models stay. Fill them before changing either.
+The Bonsai 8B legacy Q2_0 file does not load in the current fork ("legacy
+Prism Q2_0 layout"); PQ2_0 is the pack for every model.
 
 ### hailo-ollama 5.1.1 window, qwen2.5-instruct:1.5b, 2026-09-19
 
@@ -39,8 +58,9 @@ signal between a good answer and garbage.
 
 | what | cores | wall | notes | date |
 |---|---|---|---|---|
-| linux-rpi 6.18.50 plus the rest of oracle's closure | 2 | about two hours | `./build deploy-native oracle`, first native build; the same kernel under binfmt on winsmuth had run for a day without finishing | 2026-09-20 |
+| linux-rpi 6.18.50 plus the rest of oracle's closure | 2 | about two hours, from activation timestamps | `./build deploy-native oracle`, first native build; the same kernel under binfmt on winsmuth had run for a day without finishing | 2026-09-20 |
 | open-slop library plus llmq, with haddock | 2 | ten to twelve minutes, rough | cancelled and restarted once; dependencies all substituted from cache.nixos.org | 2026-09-20 |
+| PrismML llama.cpp fork, CPU | 2 | not recorded | built during a deploy-native | 2026-09-20 |
 | open-slop library plus llmq, dontHaddock | 2 | not yet timed | | |
 
 ### Activation costs on oracle

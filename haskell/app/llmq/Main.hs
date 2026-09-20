@@ -58,6 +58,10 @@ commonP =
     <*> optional (strOption (long "key-file" <> metavar "FILE" <> help "bearer key for the gateway (default $LLMQ_KEY_FILE)"))
     <*> option auto (long "timeout" <> short 't' <> metavar "SECS" <> help "ceiling for one request" <> value 14400 <> showDefault)
 
+-- | One file per part is the default. Measured 2026-09-20 on
+-- qwen2.5-coder:7b: given four files in one packed part it documented one;
+-- given them one per part it documented all four, in less total time,
+-- because prefill and decode both slow as the context grows.
 runP :: Parser RunOpts
 runP =
   RunOpts
@@ -70,7 +74,7 @@ runP =
     <*> optional (strOption (long "resume" <> short 'r' <> metavar "ID"))
     <*> switch (long "dry-run" <> short 'n' <> help "show the parts, send nothing")
     <*> switch (long "fresh" <> help "discard an existing job for this input first")
-    <*> switch (long "per-file" <> help "one file per part: every catsrc marker starts a new part")
+    <*> (not <$> switch (long "packed" <> help "fill parts to the budget instead of one file per part"))
 
 askP :: Parser AskOpts
 askP =
