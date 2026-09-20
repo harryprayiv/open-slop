@@ -1,7 +1,7 @@
 # The Hailo-10H NPU: driver, firmware, and the inference server on top.
 #
-# One of open-slop's NixOS modules. Gated on services.open-slop.hailo.enable, so a row
-# without the NPU evaluates none of it.
+# One of open-slop's NixOS modules. Gated on services.open-slop.hailo.enable,
+# so a row without the NPU evaluates none of it.
 #
 # The port comes from the catalogue, which describes the port hailo-ollama
 # binds rather than setting it. See the note on it there, and the assertion
@@ -109,7 +109,7 @@ in
           exit 1
         fi
       '';
-            
+
       description = "Hailo NPU inference endpoint, ollama-compatible API";
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
@@ -125,7 +125,7 @@ in
         ExecStart = lib.getExe hailoZoo;
         Restart = "on-failure";
         RestartSec = 5;
-        
+
         WorkingDirectory = "/var/lib/hailo-ollama";
         # A FIXED USER, NOT DynamicUser.
         #
@@ -216,10 +216,16 @@ in
       # only one version failed and the one present in both worked, which
       # looked like an intermittent network problem for an hour.
       #
-      # The zoo's store path is stamped into the directory instead, so a
-      # version change re-seeds. That discards pulled weights too, which is
-      # correct: they are compiled per-runtime and 5.1.1's blobs are not
-      # valid for 5.3.0.
+      # The zoo's VERSION is stamped into the directory, so a version change
+      # re-seeds. That discards pulled weights too, which is correct: they are
+      # compiled per-runtime and 5.1.1's blobs are not valid for 5.3.0.
+      #
+      # THE VERSION, NOT THE STORE PATH. The stamp used to be ${hailoZoo}, and
+      # a nixpkgs bump on 2026-09-20 rebuilt the same 5.1.1 tarball into a
+      # new path, mismatched the stamp, wiped 9 GB of blobs and re-pulled
+      # them all. The path changes whenever stdenv does; the version changes
+      # when Hailo ships something new, which is the only time a wipe is
+      # wanted.
       #
       # ======================================================================
       # THE RECURSIVE chown IS INSIDE THE IF, DELIBERATELY
@@ -235,7 +241,17 @@ in
       script = ''
         stamp=/var/lib/hailo-ollama/.zoo-version
 
-        if [ "$(cat "$stamp" 2>/dev/null)" != "${hailoZoo}" ]; then
+        # Migration from the store-path stamp. A stamp naming a zoo package of
+        # THIS version is the same runtime, so it is rewritten rather than
+        # treated as a change. Remove after every row has activated once.
+        case "$(cat "$stamp" 2>/dev/null)" in
+          /nix/store/*-hailo-gen-ai-model-zoo-${hailoZoo.version})
+            echo "${hailoZoo.version}" > "$stamp"
+            ;;
+        esac
+
+        if [ "$(cat "$stamp" 2>/dev/null)" != "${hailoZoo.version}" ]; then
+          echo "zoo version changed to ${hailoZoo.version}; re-seeding and discarding pulled weights"
           # .local TOO. The server writes pulled weights to
           # $HOME/.local/share/hailo-ollama/models/blob, which this unit does
           # not otherwise manage. A version change left 5.3.0's weights there
@@ -248,7 +264,7 @@ in
             /var/lib/hailo-ollama/hailo-ollama
           chown -R hailo-ollama:hailo-ollama /var/lib/hailo-ollama/hailo-ollama
           chmod -R u+w /var/lib/hailo-ollama/hailo-ollama
-          echo "${hailoZoo}" > "$stamp"
+          echo "${hailoZoo.version}" > "$stamp"
         fi
 
         mkdir -p /var/lib/hailo-ollama/.config
@@ -275,14 +291,22 @@ in
     # is actually resident.
     #
     # ========================================================================
-    # IT RE-RUNS WHEN THE ZOO VERSION CHANGES
+    # IT RE-RUNS WHEN THE ZOO VERSION OR THE MODEL LIST CHANGES, AND PULLS
+    # ONLY WHAT THE SERVER DOES NOT HAVE
     # ========================================================================
     #
-    # The zoo's store path is in the script, so a version bump changes the
-    # unit and systemd restarts it on the next activation. That matters
-    # because weights are compiled for a specific runtime: 5.1.1's blobs are
-    # not necessarily valid for 5.3.0, and a stale cache produces a model
-    # that pulls instantly and then fails at generate.
+    # The zoo's version is in the script, so a version bump changes the unit
+    # and systemd restarts it on the next activation. That matters because
+    # weights are compiled for a specific runtime: 5.1.1's blobs are not
+    # necessarily valid for 5.3.0, and a stale cache produces a model that
+    # pulls instantly and then fails at generate.
+    #
+    # The version, NOT the store path, for the same reason as the seed unit's
+    # stamp: the path moves with every nixpkgs bump and the unit re-ran on
+    # each one. And each run used to pull every declared model whether or
+    # not the server had it, which the server answered by downloading it
+    # again. GET /api/tags is what the server has; a model listed there is
+    # skipped. The same guard as pinned.nix's `ollama show`.
     #
     # If a bump leaves models broken, wipe and let this re-pull:
     #   systemctl stop hailo-ollama
@@ -299,10 +323,13 @@ in
         RemainAfterExit = true;
       };
 
-      path = [ pkgs.curl ];
+      path = [
+        pkgs.curl
+        pkgs.jq
+      ];
 
       script = ''
-        # Built against ${hailoZoo}, so this unit changes with the zoo.
+        # Built against zoo ${hailoZoo.version}, so this unit changes with it.
 
         # hailo-ollama binds and answers a moment after the unit starts, and
         # `after` only orders the start, not readiness. Poll rather than
@@ -312,16 +339,22 @@ in
           sleep 2
         done
 
+        have=$(curl -sf http://127.0.0.1:${toString port}/api/tags | jq -r '.models[]?.name' || true)
+
         ${lib.concatMapStringsSep "\n" (m: ''
-          echo "pulling ${m}"
-          curl -sf http://127.0.0.1:${toString port}/api/pull \
-            -H 'Content-Type: application/json' \
-            -d '{"model":"${m}","stream":false}' \
-            || echo "FAILED to pull ${m}, continuing" >&2
+          if printf '%s\n' "$have" | grep -qx ${lib.escapeShellArg m}; then
+            echo "${m} already present"
+          else
+            echo "pulling ${m}"
+            curl -sf http://127.0.0.1:${toString port}/api/pull \
+              -H 'Content-Type: application/json' \
+              -d '{"model":"${m}","stream":false}' \
+              || echo "FAILED to pull ${m}, continuing" >&2
+          fi
         '') cfg.hailo.models}
       '';
     };
-    
+
     # ONE RULE PER SOURCE RANGE. hailo-ollama has no authentication: anything
     # that reaches port 8000 can pull models and run prompts. On a LAN that is
     # an acceptable trade and on anything wider it is an open compute endpoint.
