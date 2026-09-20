@@ -64,7 +64,7 @@ in
     name = "Ternary-Bonsai-8B-Q2_0.gguf";
     repo = "Ternary-Bonsai-8B-gguf";
     file = "Ternary-Bonsai-8B-Q2_0.gguf";
-    hash = lib.fakeHash;
+    hash = "sha256-PI1wRwpdl+WiuUEN3Ymct0ARZZFGJibGDLL+rWRI9gs=";
     bytes = 2200000000;
     pack = "Q2_0";
   };
