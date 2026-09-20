@@ -1,14 +1,14 @@
 -- | llmq: send text to one model on one of the fleet's inference endpoints.
 --
--- The client side of OpenSlop. Picks a model, cuts long input into parts that
--- fit its window, sends the parts one at a time, keeps each finished part on
--- disk, and resumes at the first unfinished part when run again.
+-- The client side of open-slop. Picks a model, cuts long input into parts
+-- that fit its window, sends the parts one at a time, keeps each finished
+-- part on disk, and resumes at the first unfinished part when run again.
 --
 -- The catalogue arrives as JSON in $OPEN_SLOP_CATALOGUE (Nix writes it from
 -- catalogue/default.nix plus the consumer's endpoint options). Nothing here
 -- knows an address.
 --
--- Exit status: 0 done, 1 failed, 2 done with warnings.
+-- Exit status: 0 done, 1 failed, 2 done with warnings, 130 interrupted.
 module Main (main) where
 
 import Control.Monad (forM_, unless, when)
@@ -56,7 +56,7 @@ commonP =
     <$> strOption (long "catalogue" <> metavar "FILE" <> help "catalogue JSON (default $OPEN_SLOP_CATALOGUE)" <> value "")
     <*> strOption (long "state" <> short 's' <> metavar "DIR" <> help "job root (default $LLMQ_STATE, else ~/.local/state/llmq)" <> value "")
     <*> optional (strOption (long "key-file" <> metavar "FILE" <> help "bearer key for the gateway (default $LLMQ_KEY_FILE)"))
-    <*> option auto (long "timeout" <> short 't' <> metavar "SECS" <> help "limitSeconds for one request" <> value 14400 <> showDefault)
+    <*> option auto (long "timeout" <> short 't' <> metavar "SECS" <> help "ceiling for one request" <> value 14400 <> showDefault)
 
 runP :: Parser RunOpts
 runP =
