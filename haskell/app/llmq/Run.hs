@@ -3,6 +3,7 @@
 module Run
   ( Outcome (..)
   , send
+  , prepare
   , problem
   , samplingFor
   , runJob
@@ -12,7 +13,9 @@ module Run
 
 import Control.Exception (SomeException, displayException, try)
 import Control.Monad (forM, forM_, unless, when)
-import Data.Aeson (encode)
+import Data.Aeson (encode, object, (.=))
+import Data.Aeson qualified as Aeson
+import Data.Aeson.Types (parseMaybe, (.:))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.ByteString.Char8 qualified as BC
@@ -68,8 +71,36 @@ data Outcome = Outcome
   , wallSeconds :: Int
   }
 
--- | Send one request under a ceiling. Streamed text is echoed to stderr as
--- it arrives when asked; the raw lines are kept for the failed/ directory.
+-- | Give the prompt the shape the engine needs. llama-server's /completion
+-- is raw completion: the text goes to the model as-is, with no chat
+-- template, and an instruct model given its input untemplated continues
+-- the input rather than answering. The first Bonsai job (2026-09-20)
+-- reproduced its source file line by line for an hour that way. The
+-- server's /apply-template renders chat messages through the model's own
+-- template, reasoning block and all; the rendered string is then sent to
+-- /completion as a prompt with no further instruction, and the native
+-- route keeps its truncation flag and token counts. ollama and
+-- hailo-ollama apply a template on /api/generate themselves.
+prepare :: Client -> Auth -> Entry -> Prompt -> IO Prompt
+prepare client auth e p = case e.engine of
+  LlamaServer -> do
+    let messages =
+          object
+            [ "messages"
+                .= ( [object ["role" .= ("system" :: Text), "content" .= p.instruction] | not (T.null p.instruction)]
+                       <> [object ["role" .= ("user" :: Text), "content" .= T.intercalate "\n\n" (filter (not . T.null) [p.header, p.text])]]
+                   )
+            ]
+    r <- postJson client auth e.endpoint.url "/apply-template" messages
+    case r of
+      Left f -> die' ("apply-template on " <> e.endpoint.url <> " failed: " <> describeFailure f)
+      Right body -> case Aeson.decode body >>= parseMaybe (Aeson.withObject "t" (.: "prompt")) of
+        Nothing -> die' ("apply-template on " <> e.endpoint.url <> " answered without a prompt field: " <> T.take 200 (TE.decodeUtf8With TE.lenientDecode (BL.toStrict body)))
+        Just rendered -> pure (Prompt "" "" rendered)
+  _ -> pure p
+
+-- | Send one request. Streamed text is echoed to stderr as it arrives when
+-- asked; the raw lines are kept for the failed/ directory.
 send :: Client -> Auth -> Int -> Entry -> Request -> Bool -> IO Outcome
 send client auth limitSeconds e req echo = do
   rawRef <- newIORef []
@@ -318,9 +349,8 @@ runParts client auth limitSeconds e budget instruction job = do
                 <> ["It begins partway through " <> c <> ", which starts in an earlier part." | Just c <- [m.continues]]
                 <> ["Files that begin in this part: " <> T.intercalate ", " m.starts <> "." | not (null m.starts)]
             )
-        req = buildRequest e.engine e.name (Prompt instruction header body) (samplingFor budget) e.streams
-        reqBytes = BL.toStrict (encode req)
-        failPart raw why retryable = do
+        failPart req raw why retryable = do
+          let reqBytes = BL.toStrict (encode req)
           recordFailure job m.index raw reqBytes
           say ("part " <> tshow m.index <> " FAILED: " <> why)
           say ("raw response and request body kept in " <> T.pack (job.dir </> "failed"))
@@ -331,15 +361,30 @@ runParts client auth limitSeconds e budget instruction job = do
             )
           exitFailure
     say ("part " <> tshow m.index <> "/" <> tshow total <> ": " <> tshow m.bytes <> " bytes to " <> e.entryId)
+    prompt <- prepare client auth e (Prompt instruction header body)
+    let req = buildRequest e.engine e.name prompt (samplingFor budget) e.streams
     unless e.streams (say (engineName e.engine <> " does not stream; waiting for the whole answer"))
     out <- send client auth limitSeconds e req True
     TIO.hPutStrLn stderr ""
     case (problem e out, out.summary.final) of
-      (Just why, _) -> failPart out.raw why True
-      (Nothing, Nothing) -> failPart out.raw "the response has no final line" True
+      (Just why, _) -> failPart req out.raw why True
+      (Nothing, Nothing) -> failPart req out.raw "the response has no final line" True
       (Nothing, Just info) -> case judge budget m.index m.bytes out.wallSeconds info of
-        Truncated why -> failPart out.raw (why <> ". Start a new job with a smaller --chunk-bytes.") False
-        Kept st -> do
+        Truncated why -> failPart req out.raw (why <> ". Start a new job with a smaller --chunk-bytes.") False
+        Kept st0 -> do
+          -- Coverage: a file that begins in this part and is named in none
+          -- of the output's level-2 headings was skipped. The first real job
+          -- (2026-09-20) got four files and documented one, then stopped
+          -- with done_reason stop at a quarter of its cap. The model is not
+          -- asked to stop early and nothing on the server reports it; only
+          -- this comparison does.
+          let headings = [T.strip (T.drop 3 l) | l <- T.lines out.summary.output, "## " `T.isPrefixOf` l]
+              covered f = any (\h -> f `T.isInfixOf` h || T.takeWhileEnd (/= '/') f `T.isInfixOf` h) headings
+              skipped = filter (not . covered) m.starts
+              st =
+                if null skipped
+                  then st0
+                  else st0 {warnings = st0.warnings ++ ["no heading for " <> T.intercalate ", " skipped <> " (" <> tshow (length skipped) <> " of " <> tshow (length m.starts) <> " files in this part)"]}
           writePart job m.index out.summary.output st
           modifyIORef' remainingRef (subtract m.bytes)
           modifyIORef' doneBytesRef (+ m.bytes)
