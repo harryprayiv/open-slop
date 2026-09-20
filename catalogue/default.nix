@@ -71,7 +71,7 @@
       predict = 2048;
       promptOverhead = 512;
       charsPerToken = 2.8;
-      temperature = 0.2;
+      temperature = 0.0;
 
       blurb = ''
         ollama on the host's four Cortex-A76 cores. Any GGUF, num_ctx and

@@ -146,7 +146,7 @@ problem e o
   | otherwise = Nothing
 
 samplingFor :: Budget -> Sampling
-samplingFor b = Sampling {ctx = b.ctx, predict = b.predict, temperature = b.temperature, seed = Nothing}
+samplingFor b = Sampling {ctx = b.ctx, predict = b.predict, temperature = b.temperature, seed = Just 1}
 
 -- | The named prompts shipped with the package, at $OPEN_SLOP_PROMPTS. The
 -- home-manager module sets it to the prompts/ directory in the store.
