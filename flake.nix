@@ -42,6 +42,7 @@
       url = "github:Gabriella439/grace";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
     llama-cpp-prismml = {
       url = "github:PrismML-Eng/llama.cpp";
       flake = false;
@@ -85,8 +86,14 @@
 
           open-slop = {
             catalogue = import ./catalogue;
-            llmq = hlib.justStaticExecutables hpkgs.open-slop;
-            grace = hlib.justStaticExecutables hpkgs.grace;
+
+            # The binaries the fleet installs. No haddock: nothing on a row
+            # reads llmq's API documentation, and haddock was the longest
+            # single-threaded phase of the first native build on oracle.
+            # The dev shell and `checks` still build the full package.
+            llmq = hlib.justStaticExecutables (hlib.dontHaddock hpkgs.open-slop);
+            grace = hlib.justStaticExecutables (hlib.dontHaddock hpkgs.grace);
+
             llama-cpp-prismml = final.callPackage ./nix/packages/llama-cpp-prismml.nix {
               src = llama-cpp-prismml;
               rev = llama-cpp-prismml.shortRev or "dirty";
