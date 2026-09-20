@@ -1,7 +1,7 @@
 # open-slop: handoff
 
-Written 2026-09-19, revised 2026-09-20. Every claim says whether it was
-tested against mock servers, evaluated in an oracle-shaped NixOS
+Written 2026-09-19, revised 2026-09-20 (evening). Every claim says whether
+it was tested against mock servers, evaluated in an oracle-shaped NixOS
 configuration, verified against the real fleet, or only written.
 
 ## 1. What this is
@@ -18,7 +18,25 @@ be wrong written in Haskell.
 
 ## 2. State of the code
 
-### VERIFIED against the real fleet (2026-09-19)
+### VERIFIED against the real fleet (2026-09-19 and 2026-09-20)
+
+- Deployed. oracle runs generation 40, built ON oracle (kernel
+  linux-rpi 6.18.50, nixpkgs 20b1ddd), through `./build deploy-native
+  oracle` and made the boot default with `boot-native`. All four units
+  active: ollama with OLLAMA_CONTEXT_LENGTH=16384 and OLLAMA_NUM_PARALLEL=1,
+  ollama-pinned-models (sully registered, through the API, under a dynamic
+  user), hailo-ollama, hailo-ollama-models (five models present).
+- oracle is the fleet's aarch64 builder. neoblade's `builder` role is on its
+  row, `builder-client.nix` on the lab rows offers it aarch64 builds, and
+  the daemon route works: `nix store info --store
+  'ssh-ng://root@192.168.8.173?ssh-key=/var/lib/nix-builder/key'` answers
+  Trusted: 1 from winsmuth's root. `nix build
+  .#packages.aarch64-linux.llmq --option extra-platforms ""` built llmq on
+  oracle and copied it back.
+- The seed unit stamps by zoo version, not store path, and the pull unit
+  skips models `/api/tags` already lists: a re-activation after both fixes
+  logged five "already present" lines and took four seconds, where the
+  activation before them re-pulled 9 GB (twelve minutes).
 
 - The integration into neoblade-config: open-slop is a flake input, its
   overlay is on the fleet's overlay list, its NixOS modules are imported on
@@ -50,7 +68,8 @@ be wrong written in Haskell.
   to model, prompt, stream, options.num_predict; llama-server bodies with
   no model or options; -P by name, by path, with a bad name, and the
   shipped default instruction.
-- Builds clean under GHC 9.6.7 in the nix develop shell on winsmuth.
+- Builds clean under GHC 9.6.7 in the nix develop shell on winsmuth, and
+  through `nix build .#llmq` from the committed nix/open-slop.nix.
 
 ### EVALUATED in an oracle-shaped NixOS configuration
 
@@ -62,12 +81,14 @@ be wrong written in Haskell.
 
 ### WRITTEN only
 
-- flake.nix per-system outputs beyond `nix build .#llmq`, which works.
-- nix/modules/client.nix under home-manager: WORKS on winsmuth (verified
-  through `llmq list`), so this line is closed.
+- nix/packages/llama-cpp-prismml.nix: instantiates, never built.
+- nix/modules/llama-server.nix: evaluates, never activated; `llamacpp` is
+  not in oracle's `llm.backends`.
 - nix/packages/bonsai-weights.nix: lib.fakeHash placeholders; the 8B file
   name is a guess.
 - The catalogue's llamacpp backend and Bonsai entries: unmeasured.
+- The `dontHaddock` change to the shipped binaries in flake.nix: committed,
+  its build not yet timed.
 
 ### Does not exist
 
@@ -130,7 +151,19 @@ be wrong written in Haskell.
   on oracle, builder-client.nix on the lab rows offers aarch64 builds to it,
   and `./build deploy-native oracle` builds on the target by construction.
   winsmuth keeps binfmt, so plain `./build deploy oracle` still starts
-  emulating; deploy-native is the path for oracle.
+  emulating; deploy-native is the path for oracle, and for an ad-hoc build
+  `--option extra-platforms ""` sends every aarch64 derivation to the
+  builder (`--max-jobs 0` does not: nixpkgs' Haskell builder makes
+  preferLocalBuild wrapper scripts that can never go remote).
+- The pinned-models unit registers through the API under its own
+  DynamicUser. `ollama create` uploads the GGUF through /api/blobs; the
+  unit never needed the server's user or its models directory, and the
+  nixpkgs module stopped creating an `ollama` user, which broke the old
+  form on 2026-09-20.
+- The Hailo seed stamp is the zoo VERSION. A store path changes with every
+  nixpkgs bump and wiped 9 GB of blobs for a rebuild of the same 5.1.1.
+- The Hailo pull unit checks /api/tags first. /api/pull re-downloads a
+  model the server already has.
 
 ## 5. Improvement list: status
 
@@ -184,9 +217,13 @@ Still open:
    templates.
 5. Bonsai on a Pi 5: prefill and decode for PQ2_0 27B and for the 8B.
    Blocks the entire Bonsai plan.
-6. GHC builds for aarch64: oracle is now a native builder, so the question
-   is how long `nix build .#packages.aarch64-linux.llmq` takes there, not
-   whether emulation is bearable. Unmeasured.
+6. ANSWERED 2026-09-20: the library plus llmq built natively on oracle in
+   roughly ten to twelve minutes wall at nix.settings.cores = 2, haddock
+   included, with every dependency substituted from cache.nixos.org. The
+   figure is rough because the build was cancelled and restarted once. The
+   dontHaddock build has not been timed. hosts/oracle.nix's `max-jobs = 2;
+   cores = 2` is the wrong shape for one build at a time beside inference;
+   `max-jobs = 1; cores = 4` is the change to make there.
 7. The real Bonsai 8B file name, and all three weight hashes.
 8. Whether hailo-ollama honours `server.host` from a copy of its JSON in
    $XDG_CONFIG_HOME, which is what would bind it to loopback for the
@@ -296,23 +333,34 @@ written to your stated needs and is unmeasured like the one before it.
 - With binfmt still on winsmuth, `./build deploy oracle` emulates; use
   `./build deploy-native oracle`. Dropping binfmt is a deliberate edit to
   hosts/winsmuth.nix and has not been made.
+- Anything longer than a minute runs under `systemd-run --user --collect
+  --unit=NAME`. A foreground nix client that is Ctrl-C'd cancels the build
+  on the builder too; Ctrl-Z then `bg; disown` keeps it alive.
+- `services.ollama.loadModels` runs `ollama pull` at every activation. For
+  a present model that is a registry check and a manifest timestamp, not a
+  download; `ollama list` dates move on every deploy for that reason.
+- Models pulled by hand on oracle are undeclared state. Three appeared on
+  2026-09-19 and one reappeared on 2026-09-20; both times removed with
+  `ollama rm`. The ollama journal names the client address of every pull.
 - Two stale strings in neoblade-config say roles.llm.backend (singular);
   docs/hailo.md section 13 and the version assertion in hailo.nix disagree
   about firmware; the flake.nix comment on configurationRevision is wrong.
 
 ## 9. Order of work
 
-1. `./build deploy-native oracle` for the pending kernel and the builder
-   role; then `sudo -i nix store ping --store ssh-ng://root@192.168.8.173`
-   from winsmuth to prove the daemon route.
-2. Time `nix build .#packages.aarch64-linux.llmq` through the builder.
-3. Phase 0: build the fork on oracle, fill the weight hashes, deploy the
-   llama-server unit, run llama-bench, fill docs/measurements.md.
-4. Run open questions 1 to 3 and 8 (curl and one config copy on oracle).
-5. Gateway, with a Haskell mock and the VM test.
-6. Runner, with cancel, notifications, PRs, VM test.
-7. Golden set, then quality items in order 26 mechanical, 28, 18, 25.
-8. Grace fork and trials.
+Steps 1 and 2 of the previous list are done (native deploy, builder route,
+first aarch64 timing).
+
+1. Phase 0: fill the three weight hashes in nix/packages/bonsai-weights.nix
+   (first build fails with the real hash), add "llamacpp" to oracle's
+   `llm.backends`, `./build deploy-native oracle`, then under systemd-run on
+   oracle: `llama-bench` per docs/measurements.md. Fill that file.
+2. Run open questions 1 to 3 and 8 (curl and one config copy on oracle).
+3. Gateway, with a Haskell mock and the VM test. Developed with cabal on
+   winsmuth; built for oracle through the builder only when deploying.
+4. Runner, with cancel, notifications, PRs, VM test.
+5. Golden set, then quality items in order 26 mechanical, 28, 18, 25.
+6. Grace fork and trials.
 
 ## 10. What to look at first when something is wrong
 
