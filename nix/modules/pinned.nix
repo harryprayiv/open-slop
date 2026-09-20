@@ -23,9 +23,23 @@
 # a manifest. `ollama create` does that conversion, given a Modelfile whose
 # FROM line points at the .gguf.
 #
-# So this copies the weights a second time, into /var/lib/ollama. A 4 GB model
-# occupies 8 GB total. On a 118 GB card that is acceptable; on the 32 GB card
-# the Pi shipped with it would not be.
+# THE CLI DOES NOT TOUCH THE MODELS DIRECTORY. `ollama create` reads the
+# Modelfile, computes the GGUF's digest, uploads the bytes to the server
+# through /api/blobs, and asks the server to create the model. The server
+# writes the blob and the manifest, as whatever user it runs as. So this unit
+# needs a route to the server and a readable store path, and nothing else:
+# no OLLAMA_MODELS, no matching user, no write access to /var/lib.
+#
+# An earlier version ran as User = "ollama" with OLLAMA_MODELS set to match
+# the server, on the belief that the CLI wrote blobs directly. That user
+# exists only when services.ollama.user is set; the nixpkgs module runs
+# ollama under DynamicUser by default, and the unit failed at start with
+# "Failed to determine credentials for user 'ollama'" on 2026-09-20 after a
+# nixpkgs bump. Running under its own DynamicUser removes the coupling.
+#
+# So this copies the weights a second time, into the server's blob store. A
+# 4 GB model occupies 8 GB total. On a 118 GB card that is acceptable; on the
+# 32 GB card the Pi shipped with it would not be.
 #
 # The guard is `ollama show`: registration is skipped if the name already
 # resolves. Changing the URL or hash changes the store path, which changes
@@ -36,16 +50,6 @@
 #
 # Left as manual because the alternative is a unit that deletes model weights
 # on its own initiative.
-#
-# ============================================================================
-# EVERYTHING ABOUT THE SERVER IS READ FROM services.ollama
-# ============================================================================
-#
-# The port, the models directory, and the binary. This unit talks to the
-# server llm.nix configured, so it asks that configuration rather than
-# repeating 11434 or naming a package llm.nix might not have chosen. On
-# aarch64 pkgs.ollama and pkgs.ollama-cpu are the same derivation today; on a
-# row where they differ, the CLI still matches the server.
 {
   config,
   lib,
@@ -75,8 +79,11 @@ in
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        User = "ollama";
-        Group = "ollama";
+
+        # Its own transient user. It talks to the server over loopback and
+        # reads a world-readable store path; it owns nothing on disk beyond
+        # the runtime directory below.
+        DynamicUser = true;
         RuntimeDirectory = "ollama-pinned";
       };
 
@@ -87,15 +94,10 @@ in
 
       environment = {
         OLLAMA_HOST = endpoint;
-        # The CLI panics with "$HOME is not defined" without one of these.
-        # It resolves its model directory from $HOME when OLLAMA_MODELS is
-        # unset, and a systemd unit has no $HOME.
-        #
-        # OLLAMA_MODELS must match what services.ollama uses, or `ollama
-        # create` writes the blob somewhere the server will not look and the
-        # registration succeeds while the model stays invisible.
-        OLLAMA_MODELS = ollama.modelsDir;
-        HOME = "/var/lib/ollama";
+        # The CLI panics with "$HOME is not defined" without one. It keeps
+        # its own config there and nothing else; the runtime directory is
+        # writable by the dynamic user and gone after the unit stops.
+        HOME = "/run/ollama-pinned";
       };
 
       script = ''
