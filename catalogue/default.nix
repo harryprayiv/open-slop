@@ -35,7 +35,9 @@
 #                   bytes, and prints the observed ratio after every part, so a
 #                   wrong figure is visible after the first one.
 #   tokPerSec       generation rate MEASURED on oracle, or null. Never a vendor
-#                   figure. docs/hailo.md section 14 holds the measurements.
+#                   figure. docs/measurements.md holds the measurements and the
+#                   prompt sizes they were taken at; a rate at a short prompt
+#                   overstates a long job on this CPU by several times.
 #   docFit          "best", "usable", "poor", "unsuitable" or "unknown", for
 #                   turning long source text into reference documentation
 #                   specifically.
@@ -145,10 +147,12 @@
       streams = true;
       acceptsOptions = true;
 
-      # [?] Nothing below is measured. Bonsai's hybrid attention keeps 32K of
-      # cache near 1.5 GB, so memory allows it; prefill time on a Pi 5 CPU is
-      # what will set the real ceiling. predict is generous because the
-      # model writes JSON when asked for structure, and JSON costs tokens.
+      # MEASURED 2026-09-20 on the 8B: prefill 4.6 tok/s at 128 tokens and
+      # 2.85 at 8K; decode 3.6 at short context and 0.47 at 8K. Context
+      # length sets the rate on this CPU, not model size. 32K is held for
+      # memory's sake; nothing here should be sent 32K of prompt, because
+      # the prefill alone would be hours. predict is kept at 4096 for the
+      # short-prompt work this backend is actually good at.
       ctx = 32768;
       predict = 4096;
       promptOverhead = 512;
@@ -159,11 +163,14 @@
         llama-server from PrismML's llama.cpp fork, serving one ternary
         Bonsai GGUF from the store. Reports its own truncation, streams, and
         takes n_predict and temperature per request. Context is fixed at
-        start.
+        start. llmq renders the chat template through /apply-template first;
+        /completion alone is raw completion and an instruct model given
+        untemplated input continues it instead of answering.
 
-        Runs on demand, not at boot: the 27B holds 7 GB for as long as it
-        runs. Expect decode near 1 tok/s on a Pi 5 and prefill measured in
-        minutes per 16K; see docs/measurements.md once it exists.
+        Runs on demand, not at boot. Measured 2026-09-20 on a Pi 5: the 8B
+        decodes at 3.6 tok/s on a short prompt and 0.47 tok/s at 8K of
+        context, with prefill at 2.85 tok/s there. Fast for `llmq ask`;
+        slower than qwen2.5-coder:7b for documentation-length parts.
       '';
     };
   };
@@ -171,39 +178,47 @@
   models = {
     llamacpp = {
       "bonsai-2-27b" = {
-        summary = "Ternary Bonsai 2 27B, PQ2_0, unmeasured";
-        docFit = "unknown";
-        tokPerSec = null;
+        summary = "Ternary Bonsai 2 27B, PQ2_0, 0.66 tok/s";
+        docFit = "unsuitable";
+        tokPerSec = 0.66;
         licence = "Apache-2.0";
         blurb = ''
-          Bonsai 2 27B, ternary weights in the PQ2_0 pack, about 7.2 GB,
-          served by llama-server with reasoning off.
+          Bonsai 2 27B, Qwen3.5-based, ternary weights in the PQ2_0 pack,
+          7.2 GB, served by llama-server with reasoning off.
 
-          The strongest model the fleet can hold. Whether it is usable for
-          documentation on this hardware is a question of prefill time, and
-          that has not been measured. Until it is, docs fit is unknown.
+          Measured 2026-09-20 (llama-bench, four threads): prefill 0.98
+          tok/s, decode 0.66 tok/s, both on short prompts. A 16K prompt is
+          over four hours before the first output token. Not a working model
+          on a Pi 5; kept in the catalogue so the number is not remeasured.
         '';
       };
 
       "bonsai-8b" = {
-        summary = "Ternary Bonsai 8B, Q2_0, unmeasured";
-        docFit = "unknown";
-        tokPerSec = null;
+        summary = "Ternary Bonsai 8B, PQ2_0, 3.6 tok/s short, 0.47 at 8K";
+        docFit = "unsuitable";
+        tokPerSec = 3.6;
         licence = "Apache-2.0";
         blurb = ''
-          First-generation Bonsai 8B, about 2.2 GB. Roughly three times the
-          decode rate of the 27B on the same bus. The likely working model if
-          the 27B proves too slow. Unmeasured.
+          First-generation Bonsai 8B, Qwen3-8B dense, PQ2_0 pack, 2.2 GB.
+
+          Measured 2026-09-20: prefill 4.62 tok/s and decode 3.60 tok/s at
+          128 tokens (llama-bench); prefill 2.85 and decode 0.47 on a real
+          8,381-token part. The fastest CPU model on the fleet for a short
+          question and slower than qwen2.5-coder:7b (5.7 / 0.7 at the same
+          part) for documentation. tokPerSec above is the short-prompt
+          figure; llmq's dry-run estimate overstates a long job by a factor
+          of seven for this model.
         '';
       };
     };
 
     cpu = {
       "qwen2.5-coder:7b" = {
-        summary = "code-tuned 7B, the best documentation model here, 2.0 tok/s";
+        summary = "code-tuned 7B, the documentation model, 0.7 tok/s at 8K";
         docFit = "best";
-        # 2026-09-19, one 19-token answer. A real figure needs a long output.
-        tokPerSec = 2.0;
+        # 2026-09-20, a real 8,381-token part: prefill 5.7, decode 0.7. On a
+        # 19-token answer the day before it decoded at 2.0.
+        tokPerSec = 0.7;
         licence = "Apache-2.0";
         blurb = ''
           Qwen2.5-Coder 7B Instruct, Q4_K_M, about 4.7 GB resident.
@@ -214,8 +229,11 @@
           mistakes about type-level Haskell, PureScript rows and effects, and
           Nix module merge semantics. Check every claim it makes about a type.
 
-          2.0 tok/s generation measured on one short answer, in line with
-          the llama3.1:8b figure; the two are close in size.
+          Measured 2026-09-20 on a 31 KB part: 25 minutes of prefill at 5.7
+          tok/s, then 0.7 tok/s of output. A full 38 KB part is about an
+          hour and a half. Given four files in one part it documented one
+          and stopped; llmq warns when a part's output has no heading for a
+          file that begins in it.
         '';
       };
 
@@ -232,8 +250,8 @@
           than qwen2.5-coder. A 128K request is legal and fits in RAM; at this
           CPU's prefill rate it is an overnight job for a single part.
 
-          A full 2048-token output at the measured rate is about 20 minutes,
-          before prefill.
+          1.7 tok/s was measured on a short answer. Expect the qwen2.5-coder
+          figure, 0.7, at a full part's context.
         '';
       };
 

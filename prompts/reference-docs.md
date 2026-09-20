@@ -31,3 +31,5 @@ praise it. Document what each file does.
 The text may be one part of a larger input, and a file may begin partway
 through. Document only what is in this part, and say when a file is
 incomplete here.
+Every file in the part gets its own section, in the order the files appear.
+Do not stop before the last file.
