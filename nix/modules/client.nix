@@ -3,7 +3,8 @@
 #
 # A home-manager module. The consumer says which rows serve which backends
 # and at what address; open-slop turns that plus the catalogue into the JSON
-# llmq reads, and wraps the binary so $OPEN_SLOP_CATALOGUE points at it. Nothing
+# llmq reads, and wraps the binary so $OPEN_SLOP_CATALOGUE points at it and
+# $OPEN_SLOP_PROMPTS at the shipped prompts/ directory. Nothing
 # in open-slop knows an address; every one comes from `endpoints` here.
 #
 # ============================================================================
@@ -51,6 +52,7 @@ let
     postBuild = ''
       wrapProgram $out/bin/llmq \
         --set-default OPEN_SLOP_CATALOGUE ${catalogueJson} \
+        --set-default OPEN_SLOP_PROMPTS ${../../prompts} \
         --prefix PATH : ${lib.makeBinPath [ pkgs.fzf pkgs.xsel ]} \
         ${lib.optionalString (cfg.keyFile != null) "--set-default LLMQ_KEY_FILE ${lib.escapeShellArg cfg.keyFile}"}
     '';

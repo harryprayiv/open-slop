@@ -32,7 +32,7 @@ import OpenSlop.Engine
 import OpenSlop.Http
 import OpenSlop.Job
 import OpenSlop.Stats (Stats (..), Verdict (..), judge)
-import System.Directory (doesFileExist, removePathForcibly)
+import System.Directory (doesFileExist, listDirectory, removePathForcibly)
 import System.Environment (lookupEnv)
 import System.Exit
 import System.FilePath ((</>))
@@ -116,19 +116,59 @@ problem e o
 samplingFor :: Budget -> Sampling
 samplingFor b = Sampling {ctx = b.ctx, predict = b.predict, temperature = b.temperature, seed = Nothing}
 
-defaultInstruction :: Text
-defaultInstruction =
-  T.unlines
-    [ "You are writing reference documentation for the source text that follows."
-    , "For each file in it, write a level-2 Markdown heading naming the file, then"
-    , "say what the file is for, what it provides to the rest of the system, and"
-    , "any behaviour a maintainer would not guess from names alone."
-    , "State only what the text shows. Where the text is silent, say so. Do not"
-    , "invent functions, options, or behaviour."
-    , "Write plain declarative sentences. Do not use em-dashes."
-    , "The text may be one part of a larger input. Document only what is in this"
-    , "part."
-    ]
+-- | The named prompts shipped with the package, at $OPEN_SLOP_PROMPTS. The
+-- home-manager module sets it to the prompts/ directory in the store.
+promptsDir :: IO (Maybe FilePath)
+promptsDir = lookupEnv "OPEN_SLOP_PROMPTS"
+
+-- | @-P NAME@ with no slash and no .md is a prompt from the shipped set;
+-- anything else is a path.
+resolvePrompt :: FilePath -> IO Text
+resolvePrompt spec
+  | '/' `elem` spec || ".md" `isSuffixOf'` spec = readOrDie spec
+  | otherwise = do
+      dir <- promptsDir
+      case dir of
+        Nothing -> die' ("-P " <> T.pack spec <> " names a shipped prompt, and OPEN_SLOP_PROMPTS is not set; pass a path")
+        Just d -> do
+          let path = d </> (spec <> ".md")
+          ok <- doesFileExist path
+          unless ok do
+            available <- filter (\f -> ".md" `isSuffixOf'` f && f /= "README.md") <$> listDirectory d
+            die' ("no prompt named " <> T.pack spec <> " in " <> T.pack d <> "; available: " <> T.intercalate ", " (map (T.pack . stripMd) available))
+          readOrDie path
+  where
+    isSuffixOf' suf str = reverse suf == take (length suf) (reverse str)
+    stripMd f = if ".md" `isSuffixOf'` f then take (length f - 3) f else f
+    readOrDie p = do
+      ok <- doesFileExist p
+      unless ok (die' ("no such file: " <> T.pack p))
+      TIO.readFile p
+
+-- | The instruction used when none is given: prompts/reference-docs.md from
+-- the shipped set, or a built-in copy when the set is not on this machine.
+defaultInstruction :: IO Text
+defaultInstruction = do
+  dir <- promptsDir
+  case dir of
+    Just d -> do
+      let path = d </> "reference-docs.md"
+      ok <- doesFileExist path
+      if ok then TIO.readFile path else pure builtIn
+    Nothing -> pure builtIn
+  where
+    builtIn =
+      T.unlines
+        [ "You are writing reference documentation for the source text that follows."
+        , "For each file in it, write a level-2 Markdown heading naming the file, then"
+        , "say what the file is for, what it provides to the rest of the system, and"
+        , "any behaviour a maintainer would not guess from names alone."
+        , "State only what the text shows. Where the text is silent, say so. Do not"
+        , "invent functions, options, or behaviour."
+        , "Write plain declarative sentences. Do not use em-dashes."
+        , "The text may be one part of a larger input. Document only what is in this"
+        , "part."
+        ]
 
 -- | The clipboard, a pipe, or a file. Never a terminal paste: a tty in
 -- canonical mode discards everything past 4095 bytes of a line.
@@ -188,18 +228,18 @@ runJob common client auth cat o = do
       let budget = maybe e.budget (\c -> e.budget {chunkBytes = c}) o.chunkOverride
       instruction <- case (o.prompt, o.promptFile) of
         (Just t, _) -> pure t
-        (_, Just f) -> TIO.readFile f
+        (_, Just f) -> resolvePrompt f
         _
-          | o.dryRun -> pure defaultInstruction
+          | o.dryRun -> defaultInstruction
           | otherwise -> do
               tty <- hIsTerminalDevice stdin
               if not tty
-                then pure defaultInstruction
+                then defaultInstruction
                 else do
                   TIO.hPutStr stderr "llmq: instruction, or enter for the default reference-docs one:\n> "
                   hFlush stderr
                   l <- TIO.getLine
-                  pure (if T.null (T.strip l) then defaultInstruction else l)
+                  if T.null (T.strip l) then defaultInstruction else pure l
       when o.dryRun do
         planParts e budget text
         exitSuccess

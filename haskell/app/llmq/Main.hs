@@ -64,7 +64,7 @@ runP =
     <$> optional (strOption (long "model" <> short 'm' <> metavar "MODEL" <> help "ROW/BACKEND/NAME, BACKEND/NAME or NAME; skips the menu"))
     <*> optional (strOption (long "input" <> short 'i' <> metavar "SRC" <> help "clip, a file, or - for a pipe"))
     <*> optional (strOption (long "prompt" <> short 'p' <> metavar "TEXT" <> help "the instruction"))
-    <*> optional (strOption (long "prompt-file" <> short 'P' <> metavar "FILE"))
+    <*> optional (strOption (long "prompt-file" <> short 'P' <> metavar "NAME|FILE" <> help "a shipped prompt by name (see prompts/), or a path"))
     <*> optional (strOption (long "out" <> short 'o' <> metavar "FILE" <> help "also copy the finished document here"))
     <*> optional (option auto (long "chunk-bytes" <> short 'c' <> metavar "N" <> help "override the model's input budget"))
     <*> optional (strOption (long "resume" <> short 'r' <> metavar "ID"))
