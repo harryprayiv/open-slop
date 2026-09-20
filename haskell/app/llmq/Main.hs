@@ -130,7 +130,8 @@ main = do
     Ask o -> do
       p <- probe client auth cat
       e <- chooseEntry p o.model
-      let req = buildRequest e.engine e.name (Prompt "" "" o.question) (samplingFor e.budget) e.streams
+      prompt <- prepare client auth e (Prompt "" "" o.question)
+      let req = buildRequest e.engine e.name prompt (samplingFor e.budget) e.streams
       out <- send client auth common.timeoutSeconds e req False
       case problem e out of
         Just why -> die' why
