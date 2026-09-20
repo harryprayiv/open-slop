@@ -229,20 +229,28 @@ data ServedModel = ServedModel
   deriving stock (Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
--- | Parse a tags listing. ollama and hailo-ollama: {models:[{name,details}]}.
--- llama-server: OpenAI-shaped {data:[{id}]}.
+-- | Parse a model listing. Two shapes are accepted on every engine: ollama's
+-- {models:[{name,details}]} and OpenAI's {data:[{id}]}. Measured 2026-09-20:
+-- PrismML's llama-server answers /v1/models in ollama's shape, with a
+-- "name" field, which is not what its route name suggests. A listing that
+-- carries both keys is read from "models".
 parseTags :: Engine -> BL.ByteString -> Maybe [ServedModel]
-parseTags engine body = do
+parseTags _ body = do
   v <- Aeson.decode body
-  parseMaybe (p engine) v
+  parseMaybe listing v
   where
-    p LlamaServer = Aeson.withObject "models" \o -> do
-      ds <- o .: "data"
-      pure (mapMaybe (parseMaybe (Aeson.withObject "m" \m -> ServedModel <$> m .: "id" <*> pure (Object mempty))) ds)
-    p _ = Aeson.withObject "tags" \o -> do
+    listing = Aeson.withObject "models" \o -> do
       ms <- o .:? "models"
-      pure
-        ( mapMaybe
-            (parseMaybe (Aeson.withObject "m" \m -> ServedModel <$> m .: "name" <*> (fromMaybe (Object mempty) <$> m .:? "details")))
-            (fromMaybe [] ms)
-        )
+      ds <- o .:? "data"
+      pure case (ms, ds) of
+        (Just xs, _) -> mapMaybe (parseMaybe named) xs
+        (Nothing, Just xs) -> mapMaybe (parseMaybe ided) xs
+        (Nothing, Nothing) -> []
+    named = Aeson.withObject "m" \m -> do
+      n <- m .:? "name"
+      i <- m .:? "id"
+      case (n, i) of
+        (Just name, _) -> ServedModel name <$> (fromMaybe (Object mempty) <$> m .:? "details")
+        (Nothing, Just name) -> ServedModel name <$> (fromMaybe (Object mempty) <$> m .:? "details")
+        _ -> fail "no name"
+    ided = Aeson.withObject "m" \m -> ServedModel <$> m .: "id" <*> pure (Object mempty)
