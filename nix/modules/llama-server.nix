@@ -18,13 +18,17 @@
 # can bring it up and stop it, and measuring can be done with ollama stopped.
 #
 # ============================================================================
-# LOOPBACK ONLY
+# THE BIND ADDRESS IS AN OPTION, LOOPBACK BY DEFAULT
 # ============================================================================
 #
-# The server has no authentication. It binds 127.0.0.1 and the gateway is
-# what the LAN talks to. Until the gateway exists, reach it over an ssh port
-# forward; llmq's endpoint for it is then http://127.0.0.1:<port> on the
-# forwarding machine.
+# The server has no authentication, like ollama and hailo-ollama. Those two
+# bind the LAN on oracle behind one firewall rule per allowed range, and
+# until the gateway exists this backend is reachable the same way when
+# `host` is set to 0.0.0.0. The default stays 127.0.0.1: a consumer that
+# does not say otherwise gets a server nothing outside the machine can
+# reach, and llmq on another machine reports it as no answer rather than
+# talking to it. Measured 2026-09-20: with the default, llmq's probe from
+# winsmuth timed out at eight seconds and the model was not listed.
 {
   config,
   lib,
@@ -53,6 +57,15 @@ in
       type = types.package;
       example = lib.literalExpression ''pkgs.open-slop.bonsai."2-27b-pq2_0"'';
       description = "A GGUF file in the store. Use an entry of pkgs.open-slop.bonsai.";
+    };
+
+    host = lib.mkOption {
+      type = types.str;
+      default = "127.0.0.1";
+      description = ''
+        Bind address. 0.0.0.0 with services.open-slop.openFirewallFor serves
+        the LAN, the same arrangement as the ollama and hailo backends.
+      '';
     };
 
     alias = lib.mkOption {
@@ -104,7 +117,7 @@ in
     users.groups.llama-server = { };
 
     systemd.services.llama-server = {
-      description = "llama-server (${lcfg.alias}) on 127.0.0.1:${toString backend.port}";
+      description = "llama-server (${lcfg.alias}) on ${lcfg.host}:${toString backend.port}";
       wantedBy = lib.optional lcfg.autoStart "multi-user.target";
       after = [ "network.target" ];
 
@@ -117,7 +130,7 @@ in
             "--alias"
             lcfg.alias
             "--host"
-            "127.0.0.1"
+            lcfg.host
             "--port"
             (toString backend.port)
             "--ctx-size"
@@ -159,6 +172,13 @@ in
     };
 
     environment.systemPackages = [ lcfg.package ];
+
+    # ONE RULE PER SOURCE RANGE, and none when the server is loopback-only.
+    networking.firewall.extraCommands = lib.mkIf (lcfg.host != "127.0.0.1") (
+      lib.concatMapStrings (range: ''
+        iptables -A nixos-fw -p tcp -s ${range} --dport ${toString backend.port} -j nixos-fw-accept
+      '') cfg.openFirewallFor
+    );
 
     assertions = [
       {
