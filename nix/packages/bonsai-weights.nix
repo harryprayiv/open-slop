@@ -53,7 +53,7 @@ in
     name = "Ternary-Bonsai-2-27B-PQ2_0.gguf";
     repo = "Ternary-Bonsai-2-27B-gguf";
     file = "Ternary-Bonsai-2-27B-PQ2_0.gguf";
-    hash = "sha256-REPLACE-WITH-THE-HASH-ALREADY-IN-YOUR-FILE";
+    hash = "sha256-OQfcFljbH3ipgmv41by43GXbDUZjiJN69X8ilPrmLsE=";
     bytes = 7206168928;
     pack = "PQ2_0";
   };
@@ -63,7 +63,7 @@ in
     name = "Ternary-Bonsai-2-27B-PTQ1_0.gguf";
     repo = "Ternary-Bonsai-2-27B-gguf";
     file = "Ternary-Bonsai-2-27B-PTQ1_0.gguf";
-    hash = lib.fakeHash;
+    hash = "sha256-PI1wRwpdl+WiuUEN3Ymct0ARZZFGJibGDLL+rWRI9gs=";
     bytes = 5946648928;
     pack = "PTQ1_0";
   };
@@ -75,7 +75,7 @@ in
     name = "Ternary-Bonsai-8B-PQ2_0.gguf";
     repo = "Ternary-Bonsai-8B-gguf";
     file = "Ternary-Bonsai-8B-PQ2_0.gguf";
-    hash = "sha256-PI1wRwpdl+WiuUEN3Ymct0ARZZFGJibGDLL+rWRI9gs=";
+    hash = "sha256-E3b5QqqQ5g97VwwdgbORb+oTFf+FqhxNGQBq9o+0uSI=";
     bytes = 2180000000;
     pack = "PQ2_0";
   };
