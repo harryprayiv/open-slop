@@ -4,13 +4,21 @@
 # bump is a URL and a hash moving together. This is the pinnedModels
 # discipline applied to the models the fork serves.
 #
-# The hashes below are lib.fakeHash until the first build. Nix prints the real
-# one in the mismatch error; paste it in and rebuild. Do that on the machine
-# with the fastest link, since each is several gigabytes.
+# A lib.fakeHash entry fails its first build with the real hash in the
+# error; paste it in and rebuild. Build through the aarch64 builder
+# (--option extra-platforms "") so the download lands on oracle's card.
 #
-# File names are taken from the Hugging Face model cards on 2026-09-18. The 8B
-# entry's file name is a best reading of the Bonsai 8B card and is marked
-# unverified; the first fetch confirms or corrects it.
+# ============================================================================
+# WHICH PACK
+# ============================================================================
+#
+# PQ2_0 for every model. The fork at f0a2b5d and later reads "Q2_0" as the
+# official group-64 format and refuses the first-generation files that used
+# that name for Prism's group-128 layout (2026-09-20: "this file matches the
+# legacy Prism Q2_0 layout ... use the PQ2_0 version"). The PQ2_0 file of
+# each model is the same weights in the layout the fork has an ARM NEON
+# kernel for. File names verified against the Hugging Face repos on
+# 2026-09-20.
 { lib, fetchurl }:
 let
   hf = repo: file: "https://huggingface.co/prism-ml/${repo}/resolve/main/${file}";
@@ -38,14 +46,15 @@ let
     };
 in
 {
-  # The one to measure first on a Pi 5: the fork has an ARM NEON kernel for
-  # this pack.
+  # Bonsai 2, Qwen3.5-based hybrid attention. Measured on oracle 2026-09-20:
+  # prefill 0.98 tok/s, decode 0.66 tok/s. Kept for the record; not a
+  # working model on a Pi 5.
   "2-27b-pq2_0" = weight {
     name = "Ternary-Bonsai-2-27B-PQ2_0.gguf";
     repo = "Ternary-Bonsai-2-27B-gguf";
     file = "Ternary-Bonsai-2-27B-PQ2_0.gguf";
-    hash = "sha256-OQfcFljbH3ipgmv41by43GXbDUZjiJN69X8ilPrmLsE=";
-    bytes = 7210000000;
+    hash = "sha256-REPLACE-WITH-THE-HASH-ALREADY-IN-YOUR-FILE";
+    bytes = 7206168928;
     pack = "PQ2_0";
   };
 
@@ -55,17 +64,19 @@ in
     repo = "Ternary-Bonsai-2-27B-gguf";
     file = "Ternary-Bonsai-2-27B-PTQ1_0.gguf";
     hash = lib.fakeHash;
-    bytes = 5950000000;
+    bytes = 5946648928;
     pack = "PTQ1_0";
   };
 
-  # First-generation Bonsai 8B. [?] file name unverified.
-  "8b-q2_0" = weight {
-    name = "Ternary-Bonsai-8B-Q2_0.gguf";
+  # First-generation Bonsai 8B, Qwen3-8B dense, in the PQ2_0 pack. The
+  # legacy "Ternary-Bonsai-8B-Q2_0.gguf" in the same repo does not load in
+  # the current fork.
+  "8b-pq2_0" = weight {
+    name = "Ternary-Bonsai-8B-PQ2_0.gguf";
     repo = "Ternary-Bonsai-8B-gguf";
-    file = "Ternary-Bonsai-8B-Q2_0.gguf";
+    file = "Ternary-Bonsai-8B-PQ2_0.gguf";
     hash = "sha256-PI1wRwpdl+WiuUEN3Ymct0ARZZFGJibGDLL+rWRI9gs=";
-    bytes = 2200000000;
-    pack = "Q2_0";
+    bytes = 2180000000;
+    pack = "PQ2_0";
   };
 }
