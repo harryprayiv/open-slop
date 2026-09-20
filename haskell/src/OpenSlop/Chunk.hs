@@ -15,7 +15,9 @@
 -- so the broken sequence becomes U+FFFD in that part.
 module OpenSlop.Chunk
   ( Part (..)
+  , Mode (..)
   , chunk
+  , chunkWith
   , reassemble
   , fileMarker
   ) where
@@ -75,9 +77,24 @@ data Line = Line
   , weak :: Bool
   }
 
--- | Cut @input@ into parts of at most @budget@ bytes.
+-- | How parts are cut.
+data Mode
+  = Packed
+  -- ^ fill each part to the budget, preferring file boundaries
+  | PerFile
+  -- ^ every "Start of" marker begins a new part, however little is in the
+  -- part before it; an oversized file still splits at the budget. Measured
+  -- 2026-09-20: qwen2.5-coder:7b given four files in one part documented
+  -- the first and stopped, with or without an instruction not to. One file
+  -- per part is the structural answer.
+  deriving stock (Show, Eq)
+
+-- | Cut @input@ into parts of at most @budget@ bytes, packed.
 chunk :: Int -> Text -> [Part]
-chunk budget input
+chunk = chunkWith Packed
+
+chunkWith :: Mode -> Int -> Text -> [Part]
+chunkWith mode budget input
   | budget < 2 = error "OpenSlop.Chunk.chunk: budget must be at least 2"
   | otherwise = go 1 Nothing linesV
   where
@@ -109,16 +126,21 @@ chunk budget input
                   open' = openAfter open here
                in part : go (n + 1) open' (map fst later ++ remaining)
 
-    -- Take lines while they fit, returning them with running fills.
+    -- Take lines while they fit, returning them with running fills. In
+    -- PerFile mode a marker line also ends the run when it is not the first
+    -- line taken, so it starts the next part.
     takeFit :: Int -> [(Line, Int)] -> [Line] -> ([(Line, Int)], Int, [Line])
     takeFit fill acc [] = (reverse acc, fill, [])
     takeFit fill acc (l : ls)
+      | mode == PerFile && l.strong && not (null acc) = (reverse acc, fill, l : ls)
       | fill + l.len <= budget = takeFit (fill + l.len) ((l, fill + l.len) : acc) ls
       | otherwise = (reverse acc, fill, l : ls)
 
     -- Index into @taken@ before which to cut. Looks from the overflowing line
     -- backwards, first for a strong cut, then a weak one, else takes it all.
     bestCut :: Int -> [(Line, Int)] -> [Line] -> Int
+    bestCut _ taken (next : _)
+      | mode == PerFile && next.strong = length taken
     bestCut _ taken (next : _) =
       let n = length taken
           candidates pr thresh =

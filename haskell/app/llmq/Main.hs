@@ -70,6 +70,7 @@ runP =
     <*> optional (strOption (long "resume" <> short 'r' <> metavar "ID"))
     <*> switch (long "dry-run" <> short 'n' <> help "show the parts, send nothing")
     <*> switch (long "fresh" <> help "discard an existing job for this input first")
+    <*> switch (long "per-file" <> help "one file per part: every catsrc marker starts a new part")
 
 askP :: Parser AskOpts
 askP =

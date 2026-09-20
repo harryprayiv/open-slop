@@ -30,7 +30,7 @@ import Data.Text.IO qualified as TIO
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Menu
 import OpenSlop.Catalogue
-import OpenSlop.Chunk (Part (..), chunk)
+import OpenSlop.Chunk (Mode (..), Part (..), chunkWith)
 import OpenSlop.Engine
 import OpenSlop.Http
 import OpenSlop.Job
@@ -55,6 +55,7 @@ data RunOpts = RunOpts
   , resume :: Maybe Text
   , dryRun :: Bool
   , fresh :: Bool
+  , perFile :: Bool
   }
 
 data Common = Common
@@ -272,13 +273,13 @@ runJob common client auth cat o = do
                   l <- TIO.getLine
                   if T.null (T.strip l) then defaultInstruction else pure l
       when o.dryRun do
-        planParts e budget text
+        planParts e budget o.perFile text
         exitSuccess
       when o.fresh do
-        let JobId jid = jobId e.entryId budget instruction text
+        let JobId jid = jobId e.entryId budget o.perFile instruction text
         say ("discarding any existing job " <> jid)
         removePathForcibly (common.stateRoot </> T.unpack jid)
-      (job, existed) <- create common.stateRoot e.entryId src budget instruction text
+      (job, existed) <- create common.stateRoot e.entryId src budget o.perFile instruction text
       let JobId jid = job.meta.id
       say (if existed then "job " <> jid <> " already exists; resuming it" else "job " <> jid <> " created in " <> T.pack job.dir)
       pure (e, budget, instruction, job)
@@ -307,15 +308,15 @@ runJob common client auth cat o = do
       mapM_ (TIO.hPutStrLn stderr . ("  " <>)) warnings
       exitWith (ExitFailure 2)
 
-planParts :: Entry -> Budget -> Text -> IO ()
-planParts e budget text = do
-  let parts = chunk budget.chunkBytes text
+planParts :: Entry -> Budget -> Bool -> Text -> IO ()
+planParts e budget perFile text = do
+  let parts = chunkWith (if perFile then PerFile else Packed) budget.chunkBytes text
       n = length parts
       total = sum (map (.bytes) parts)
       largest = maximum (0 : map (.bytes) parts)
       mid = length (filter (isJust . (.continues)) parts)
       largestTokens = floor (fromIntegral largest / budget.bytesPerToken) :: Int
-  say (tshow n <> " parts, " <> tshow total <> " bytes, largest " <> tshow largest <> " of a " <> tshow budget.chunkBytes <> "-byte budget")
+  say (tshow n <> " parts" <> (if perFile then " (one file per part)" else "") <> ", " <> tshow total <> " bytes, largest " <> tshow largest <> " of a " <> tshow budget.chunkBytes <> "-byte budget")
   say ("about " <> tshow largestTokens <> " tokens in the largest part at " <> tshow budget.bytesPerToken <> " bytes/token, in a " <> tshow budget.ctx <> "-token window")
   say (tshow mid <> " parts begin partway through a file")
   case e.tokPerSec of

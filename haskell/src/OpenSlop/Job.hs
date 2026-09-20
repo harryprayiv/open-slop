@@ -38,7 +38,9 @@ module OpenSlop.Job
 
 import Control.Exception (bracket)
 import Control.Monad (forM, unless, when)
-import Data.Aeson (FromJSON, ToJSON, eitherDecodeFileStrict, encodeFile)
+import Data.Aeson (FromJSON (..), ToJSON, eitherDecodeFileStrict, encodeFile)
+import Data.Aeson qualified as Aeson
+import Data.Maybe (fromMaybe)
 import Data.ByteString qualified as B
 import Data.ByteString.Base16 qualified as B16
 import Data.Text (Text)
@@ -48,7 +50,7 @@ import Data.Text.IO qualified as TIO
 import Data.Time (UTCTime, getCurrentTime)
 import GHC.Generics (Generic)
 import OpenSlop.Catalogue (Budget (..))
-import OpenSlop.Chunk (Part (..), chunk)
+import OpenSlop.Chunk (Mode (..), Part (..), chunkWith)
 import OpenSlop.Stats (Stats)
 import System.Directory
 import System.FileLock (SharedExclusive (Exclusive), tryLockFile, unlockFile)
@@ -66,12 +68,26 @@ data Meta = Meta
   -- ^ row/backend/name
   , source :: Text
   , budget :: Budget
+  , perFile :: Bool
+  -- ^ one file per part; absent in jobs made before 2026-09-20, read as False
   , inputBytes :: Int
   , parts :: Int
   , created :: UTCTime
   }
   deriving stock (Show, Generic)
-  deriving anyclass (ToJSON, FromJSON)
+  deriving anyclass (ToJSON)
+
+instance FromJSON Meta where
+  parseJSON = Aeson.withObject "Meta" \o ->
+    Meta
+      <$> o Aeson..: "id"
+      <*> o Aeson..: "model"
+      <*> o Aeson..: "source"
+      <*> o Aeson..: "budget"
+      <*> (fromMaybe False <$> o Aeson..:? "perFile")
+      <*> o Aeson..: "inputBytes"
+      <*> o Aeson..: "parts"
+      <*> o Aeson..: "created"
 
 data ManifestEntry = ManifestEntry
   { index :: Int
@@ -94,8 +110,8 @@ data Job = Job
   deriving stock (Show)
 
 -- | Twelve hex characters of sha256 over everything that shapes the parts.
-jobId :: Text -> Budget -> Text -> Text -> JobId
-jobId model budget instruction input =
+jobId :: Text -> Budget -> Bool -> Text -> Text -> JobId
+jobId model budget perFile instruction input =
   JobId
     . T.take 12
     . TE.decodeUtf8
@@ -109,6 +125,7 @@ jobId model budget instruction input =
           , T.pack (show budget.ctx)
           , T.pack (show budget.predict)
           , T.pack (show budget.temperature)
+          , if perFile then "per-file" else "packed"
           , TE.decodeUtf8 (B16.encode (SHA256.hash (TE.encodeUtf8 instruction)))
           , TE.decodeUtf8 (B16.encode (SHA256.hash (TE.encodeUtf8 input)))
           ]
@@ -120,9 +137,9 @@ tag = printf "%04d"
 -- | Create the job directory, or open it if it already exists for this id.
 -- Built under a temporary name and renamed into place, so a half-written
 -- job never looks like a whole one.
-create :: FilePath -> Text -> Text -> Budget -> Text -> Text -> IO (Job, Bool)
-create root model source budget instruction input = do
-  let JobId jid = jobId model budget instruction input
+create :: FilePath -> Text -> Text -> Budget -> Bool -> Text -> Text -> IO (Job, Bool)
+create root model source budget perFile instruction input = do
+  let JobId jid = jobId model budget perFile instruction input
       dir = root </> T.unpack jid
   exists <- doesFileExist (dir </> "meta.json")
   if exists
@@ -135,7 +152,7 @@ create root model source budget instruction input = do
       createDirectoryIfMissing True (build </> "failed")
       TIO.writeFile (build </> "input.txt") input
       TIO.writeFile (build </> "instruction.txt") instruction
-      let parts = chunk budget.chunkBytes input
+      let parts = chunkWith (if perFile then PerFile else Packed) budget.chunkBytes input
       when (null parts) (fail "the chunker produced no parts")
       mapM_ (\p -> TIO.writeFile (build </> "chunks" </> (tag p.index <> ".txt")) p.body) parts
       let manifest = [ManifestEntry {index = p.index, bytes = p.bytes, continues = p.continues, starts = p.starts} | p <- parts]
@@ -147,6 +164,7 @@ create root model source budget instruction input = do
               , model
               , source
               , budget
+              , perFile
               , inputBytes = B.length (TE.encodeUtf8 input)
               , parts = length parts
               , created = now
