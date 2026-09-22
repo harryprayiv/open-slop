@@ -12,6 +12,7 @@ module OpenSlop.Http
   , getBody
   , postLines
   , postJson
+  , postJsonWithin
   , HttpFailure (..)
   , describeFailure
   ) where
@@ -112,8 +113,8 @@ postLines (Client mgr) auth base path body onLine = do
     Left e -> Left (Transport (describeException e))
     Right x -> x
 
--- | POST a JSON body and return the whole response body. For small
--- request-reply routes such as llama-server's /apply-template.
+-- | POST a JSON body and return the whole response body, within 60 seconds.
+-- For small request-reply routes such as llama-server's /apply-template.
 postJson
   :: (ToJSON a)
   => Client
@@ -122,7 +123,20 @@ postJson
   -> ByteString
   -> a
   -> IO (Either HttpFailure BL.ByteString)
-postJson (Client mgr) auth base path body = do
+postJson = postJsonWithin (Just 60)
+
+-- | The same, with the ceiling given: Nothing for none. The gateway sends a
+-- whole generation this way, and a CPU prefill can take most of an hour.
+postJsonWithin
+  :: (ToJSON a)
+  => Maybe Int
+  -> Client
+  -> Auth
+  -> Text
+  -> ByteString
+  -> a
+  -> IO (Either HttpFailure BL.ByteString)
+postJsonWithin limit (Client mgr) auth base path body = do
   r <- try @HttpException do
     req0 <- parseRequest (T.unpack base)
     let req =
@@ -131,7 +145,7 @@ postJson (Client mgr) auth base path body = do
             , path = path
             , requestHeaders = ("Content-Type", "application/json") : authHeader auth
             , requestBody = RequestBodyLBS (encode body)
-            , responseTimeout = responseTimeoutMicro (60 * 1000000)
+            , responseTimeout = maybe responseTimeoutNone (\s -> responseTimeoutMicro (s * 1000000)) limit
             }
     resp <- httpLbs req mgr
     pure (statusCode (responseStatus resp), responseBody resp)

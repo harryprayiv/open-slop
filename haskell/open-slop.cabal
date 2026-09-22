@@ -1,7 +1,7 @@
 cabal-version:      3.0
 name:               open-slop
 version:            0.1.0.0
-synopsis:           A Nix-configured local LLM machine: catalogue, engines, jobs, client
+synopsis:           A Nix-configured local LLM machine: catalogue, engines, jobs, client, gateway
 license:            AGPL-3.0-or-later
 author:             Harry Pray IV
 maintainer:         harry@harryprayiv.com
@@ -40,8 +40,13 @@ library
     OpenSlop.Catalogue
     OpenSlop.Chunk
     OpenSlop.Engine
+    OpenSlop.Gateway.Keys
+    OpenSlop.Gateway.Route
+    OpenSlop.Gateway.Server
+    OpenSlop.Gateway.Translate
     OpenSlop.Http
     OpenSlop.Job
+    OpenSlop.OpenAI
     OpenSlop.Stats
   build-depends:
     aeson >=2.1,
@@ -56,7 +61,8 @@ library
     http-client-tls,
     http-types,
     text,
-    time
+    time,
+    wai
 
 executable llmq
   import:          shared
@@ -79,6 +85,20 @@ executable llmq
     typed-process,
     unix
 
+executable open-slop-gateway
+  import:          shared
+  hs-source-dirs:  app/gateway
+  main-is:         Main.hs
+  ghc-options:     -threaded -rtsopts
+  build-depends:
+    open-slop,
+    aeson,
+    optparse-applicative,
+    text,
+    time,
+    warp,
+    warp-tls
+
 test-suite open-slop-test
   import:          shared
   type:            exitcode-stdio-1.0
@@ -86,6 +106,9 @@ test-suite open-slop-test
   main-is:         Main.hs
   build-depends:
     open-slop,
+    aeson,
+    bytestring,
+    containers,
     tasty,
     tasty-hunit,
     tasty-quickcheck,
