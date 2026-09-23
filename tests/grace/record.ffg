@@ -1,0 +1,9 @@
+# A record result. Grace compiles the annotation to a strict JSON Schema, the
+# gateway passes it to ollama as `format` (grammar-constrained decoding), and
+# Grace checks the answer against the type before returning it.
+let key = env:OPEN_SLOP_KEY
+
+let model = env:OPEN_SLOP_MODEL
+
+in  prompt{ key, model, text: "Name one colour and one whole number." }
+      : { colour: Text, number: Natural }

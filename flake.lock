@@ -45,15 +45,15 @@
         "utils": "utils"
       },
       "locked": {
-        "lastModified": 1781381208,
-        "narHash": "sha256-nx1xrluibbtNmJb/LoKVW2xoGJAsXOOyg0j+beUTCa8=",
-        "owner": "Gabriella439",
+        "lastModified": 1790126776,
+        "narHash": "sha256-SWGwbxixAhUsBOFkv0+pjfurYXgaj+Mvtl33nx6xJvU=",
+        "owner": "harryprayiv",
         "repo": "grace",
-        "rev": "a70b1ef6187adaf1d74caa35ab6e0a232ed6818d",
+        "rev": "419a9fcb45402ac3b3f96940ce272f804ea7f5a0",
         "type": "github"
       },
       "original": {
-        "owner": "Gabriella439",
+        "owner": "harryprayiv",
         "repo": "grace",
         "type": "github"
       }

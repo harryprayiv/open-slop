@@ -1,0 +1,6 @@
+# Plain text. No response_format constraint reaches the backend.
+let key = env:OPEN_SLOP_KEY
+
+let model = env:OPEN_SLOP_MODEL
+
+in  prompt{ key, model, text: "In one sentence, what is a NixOS module?" } : Text

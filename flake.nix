@@ -1,5 +1,5 @@
 {
-  description = "open-slop: a Nix-configured local LLM machine, its catalogue, client, and (later) gateway and runner";
+  description = "open-slop: a Nix-configured local LLM machine, its catalogue, client, gateway, and (later) runner";
 
   # ==========================================================================
   # SHAPE
@@ -27,6 +27,9 @@
   #   homeManagerModules.default  programs.llmq
   #   lib.catalogue               the catalogue as data
   #
+  # pkgs.open-slop.llmq carries both executables, bin/llmq and
+  # bin/open-slop-gateway, because they are one cabal package.
+  #
   # THE CONSUMER ADDS THE OVERLAY. The modules do not set nixpkgs.overlays
   # themselves: a home-manager configuration running with useGlobalPkgs
   # rejects nixpkgs.overlays from a module, and the same overlay set twice
@@ -38,8 +41,11 @@
 
     flake-utils.url = "github:numtide/flake-utils";
 
+    # The fork with OPENAI_BASE_URL in Grace.HTTP.getMethods, so `prompt`
+    # reaches the gateway instead of api.openai.com. A path while it is
+    # iterated on beside this repo; a forge URL once it is pushed.
     grace = {
-      url = "github:Gabriella439/grace";
+      url = "github:harryprayiv/grace";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -112,6 +118,7 @@
         pinned = ./nix/modules/pinned.nix;
         hailo = ./nix/modules/hailo.nix;
         llama-server = ./nix/modules/llama-server.nix;
+        gateway = ./nix/modules/gateway.nix;
         catalogue-check = ./nix/modules/catalogue-check.nix;
         default = {
           imports = [
@@ -120,6 +127,7 @@
             ./nix/modules/pinned.nix
             ./nix/modules/hailo.nix
             ./nix/modules/llama-server.nix
+            ./nix/modules/gateway.nix
             ./nix/modules/catalogue-check.nix
           ];
         };
@@ -155,6 +163,16 @@
           default = {
             type = "app";
             program = "${pkgs.open-slop.llmq}/bin/llmq";
+          };
+
+          gateway = {
+            type = "app";
+            program = "${pkgs.open-slop.llmq}/bin/open-slop-gateway";
+          };
+
+          grace = {
+            type = "app";
+            program = "${pkgs.open-slop.grace}/bin/grace";
           };
 
           # Regenerates nix/open-slop.nix from haskell/open-slop.cabal. Run
