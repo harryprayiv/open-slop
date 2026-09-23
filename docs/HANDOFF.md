@@ -55,6 +55,15 @@ be wrong written in Haskell.
 - Four undeclared models were on oracle's card (gemma2:2b, phi3:latest, two
   TheBloke GGUFs, 11.3 GB); removed. The declared three plus sully remain.
 
+- The grace branch, 2026-09-22, on winsmuth against a local ollama with
+  qwen2.5:0.5b: the Grace fork (OPENAI_BASE_URL in Grace.HTTP.getMethods)
+  reaches open-slop-gateway, which translates to ollama's /api/chat with
+  the schema as `format`. All three of Grace's prompt paths return typed
+  values: a record, a non-record wrapped as { response: T }, and Text. The
+  openai bindings decode the gateway's response body as written. Keys and
+  the model id come from `env:VAR : Key` and `env:VAR : Text`, which read
+  raw text; an unannotated import is parsed as Grace code instead.
+
 ### TESTED against mock servers
 
 - The library and llmq: Catalogue, Chunk, Engine (three engines), Http,
@@ -208,7 +217,7 @@ Still open:
 1. Does disconnecting the client stop generation on ollama during prefill,
    and on hailo-ollama at all? Blocks cancel semantics.
 2. Does ollama 0.33.3's /v1/chat/completions accept response_format with a
-   json_schema? Blocks Grace against ollama.
+   json_schema? Blocks Grace against ollama.  Anser: the gateway does not use that route, it uses /api/chat with format, and that constrains decoding correctly
 3. Does hailo-ollama serve any OpenAI-compatible route? Blocks the NPU
    behind the gateway.
 4. Is secrets.nix in neoblade-config sops-nix or agenix? It is sops-nix
