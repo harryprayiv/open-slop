@@ -1,9 +1,13 @@
 # A record result. Grace compiles the annotation to a strict JSON Schema, the
 # gateway passes it to ollama as `format` (grammar-constrained decoding), and
 # Grace checks the answer against the type before returning it.
-let key = env:OPEN_SLOP_KEY
+#
+# `: Key` and `: Text` on an import take the source's raw text rather than
+# parsing it as Grace code, so the environment variables hold the key and the
+# model id as themselves.
+let key = env:OPEN_SLOP_KEY : Key
 
-let model = env:OPEN_SLOP_MODEL
+let model = env:OPEN_SLOP_MODEL : Text
 
 in  prompt{ key, model, text: "Name one colour and one whole number." }
       : { colour: Text, number: Natural }

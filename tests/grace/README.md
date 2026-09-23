@@ -8,14 +8,16 @@ OPENAI_BASE_URL.
   list.ffg    non-record type: Grace wraps it as { response: T }
   text.ffg    Text: no schema
 
-Three environment variables, and the key never in a file:
+Three environment variables:
 
   OPENAI_BASE_URL   the gateway, e.g. http://127.0.0.1:18443
-  OPEN_SLOP_KEY     the bearer key as Grace code, a key literal: .'llm_...'
-  OPEN_SLOP_MODEL   the model id as Grace code, a text literal: "qwen2.5:0.5b"
+  OPEN_SLOP_KEY     the bearer key itself, llm_...
+  OPEN_SLOP_MODEL   the model id the gateway serves it under, e.g.
+                    winsmuth/cpu/qwen2.5:0.5b
 
-The last two are Grace `env:` imports, which parse the variable as code;
-that is why they carry Grace's literal syntax rather than bare strings.
+The last two are read by `env:VAR : Key` and `env:VAR : Text`, which take the
+variable's raw text. An import with no annotation is parsed as Grace code
+instead, which is why the annotations are not optional here.
 
 A program that names no model is sent as gpt-5-mini, Grace's default, and
 the gateway answers 404 naming it. Every program meant for this fleet

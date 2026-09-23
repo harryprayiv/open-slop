@@ -1,7 +1,7 @@
 # A non-record result. Grace wraps it as { response: List Text } for the
 # schema and unwraps the answer, so this exercises the other schema path.
-let key = env:OPEN_SLOP_KEY
+let key = env:OPEN_SLOP_KEY : Key
 
-let model = env:OPEN_SLOP_MODEL
+let model = env:OPEN_SLOP_MODEL : Text
 
 in  prompt{ key, model, text: "List three Haskell type classes." } : List Text
