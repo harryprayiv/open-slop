@@ -1,6 +1,6 @@
 { mkDerivation, aeson, base, base16-bytestring, bytestring
 , containers, cryptohash-sha256, directory, filelock, filepath
-, http-client, http-client-tls, http-types, lib
+, grace, http-client, http-client-tls, http-types, lib
 , optparse-applicative, tasty, tasty-hunit, tasty-quickcheck, text
 , time, typed-process, unix, wai, warp, warp-tls
 }:
@@ -16,13 +16,13 @@ mkDerivation {
     http-client-tls http-types text time wai
   ];
   executableHaskellDepends = [
-    aeson base bytestring containers directory filepath
+    aeson base bytestring containers directory filepath grace
     optparse-applicative text time typed-process unix warp warp-tls
   ];
   testHaskellDepends = [
     aeson base bytestring containers tasty tasty-hunit tasty-quickcheck
     text
   ];
-  description = "A Nix-configured local LLM machine: catalogue, engines, jobs, client, gateway";
+  description = "A Nix-configured local LLM machine: catalogue, engines, jobs, client, gateway, typed stages";
   license = lib.meta.getLicenseFromSpdxId "AGPL-3.0-or-later";
 }

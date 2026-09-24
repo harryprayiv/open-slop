@@ -1,0 +1,48 @@
+# The reference-docs stage. One part in, a typed Docs value out.
+#
+# The annotation at the bottom is the contract. Grace compiles it to a JSON
+# Schema for the gateway, which constrains the model's decoding to it, and
+# checks the answer against it on the way back. llmq-grace loads this file
+# as PartArgs -> IO Docs, so an annotation that does not match the Haskell
+# type fails at load, before any request is sent.
+#
+# The key and the model come from the runner, not from here, so this file
+# works against any gateway and holds no secret.
+
+\args ->
+
+prompt
+  { key: args.key
+  , model: args.model
+  , text: "
+      You are documenting source code for the maintainer who wrote it.
+
+      Document every file in the text below, in the order the files appear.
+      State only what the text shows. Do not invent options, units, or
+      behaviour. Quote identifiers exactly as written.
+
+      file: the path as the marker gives it.
+      purpose: one or two sentences on what the file is for.
+      interface: the options, packages, units, files, ports, mounts, users
+      and firewall rules it declares or reads. One per entry.
+      behaviour: what a maintainer would not guess from the names alone:
+      ordering, conditions, defaults that differ from upstream. One per
+      entry.
+      reasoning: the reasons the file's own comments give for its
+      decisions. Leave this empty when the comments give none.
+      openQuestions: only what the text itself marks as unverified, TODO,
+      or deliberately left out. Leave this empty when it marks nothing.
+
+      ${args.source}
+      "
+  }
+  : { files:
+        List
+          { file: Text
+          , purpose: Text
+          , interface: List Text
+          , behaviour: List Text
+          , reasoning: List Text
+          , openQuestions: List Text
+          }
+    }

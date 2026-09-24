@@ -1,11 +1,21 @@
 cabal-version:      3.0
 name:               open-slop
 version:            0.1.0.0
-synopsis:           A Nix-configured local LLM machine: catalogue, engines, jobs, client, gateway
+synopsis:           A Nix-configured local LLM machine: catalogue, engines, jobs, client, gateway, typed stages
 license:            AGPL-3.0-or-later
 author:             Harry Pray IV
 maintainer:         harry@harryprayiv.com
 build-type:         Simple
+
+-- llmq-grace links Grace, whose closure keeps a reference to the compiler,
+-- which puts 4.6 GB into any output containing it. The fleet's binaries
+-- (llmq, open-slop-gateway) must not carry that to a Pi, so the executable
+-- that needs Grace is behind a flag: the package builds without it by
+-- default, and the workstation build turns it on.
+flag grace
+  description: Build llmq-grace, which links Grace and the compiler with it.
+  default:     False
+  manual:      True
 
 common shared
   default-language: GHC2021
@@ -44,6 +54,7 @@ library
     OpenSlop.Gateway.Route
     OpenSlop.Gateway.Server
     OpenSlop.Gateway.Translate
+    OpenSlop.Grace.Docs
     OpenSlop.Http
     OpenSlop.Job
     OpenSlop.OpenAI
@@ -98,6 +109,27 @@ executable open-slop-gateway
     time,
     warp,
     warp-tls
+
+executable llmq-grace
+  import:          shared
+  hs-source-dirs:  app/llmq-grace
+  main-is:         Main.hs
+  other-modules:
+    Stage
+  ghc-options:     -threaded -rtsopts
+  if !flag(grace)
+    buildable:     False
+  build-depends:
+    open-slop,
+    aeson,
+    bytestring,
+    directory,
+    filepath,
+    grace,
+    optparse-applicative,
+    text,
+    time,
+    unix
 
 test-suite open-slop-test
   import:          shared

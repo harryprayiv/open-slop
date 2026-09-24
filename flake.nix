@@ -1,41 +1,50 @@
 {
-  description = "open-slop: a Nix-configured local LLM machine, its catalogue, client, gateway, and (later) runner";
+  description = "open-slop: a Nix-configured local LLM machine, its catalogue, client, gateway, and typed Grace stages";
 
   # ==========================================================================
   # SHAPE
   # ==========================================================================
   #
-  # Same conventions as chase: flake-utils.eachDefaultSystem, nixpkgs'
-  # Haskell infrastructure with one compiler pinned, an overlay that adds
-  # Grace's package set, hpkgs.shellFor for the dev shell.
+  # nixpkgs' Haskell infrastructure with one compiler pinned, an overlay that
+  # adds Grace's package set, hpkgs.shellFor for the dev shell. Not
+  # haskell.nix: this package has thirteen ordinary dependencies and one git
+  # input, and haskell.nix would add a hackage index, import-from-derivation
+  # and a repackaging of Grace for no gain here.
   #
-  # One difference, on purpose. chase builds itself with callCabal2nix, which
-  # runs cabal2nix at evaluation time (import-from-derivation). open-slop is
-  # imported by a fleet configuration whose checks evaluate every host, so
-  # its derivation is COMMITTED at nix/open-slop.nix and regenerated with
-  # `nix run .#cabal2nix` after the cabal file changes. A consumer evaluates
-  # open-slop without building anything first.
+  # The derivation is COMMITTED at nix/open-slop.nix and regenerated with
+  # `nix run .#cabal2nix`, so a consumer (neoblade-config, whose checks
+  # evaluate every host) never needs import-from-derivation.
+  #
+  # ==========================================================================
+  # WHY THERE ARE TWO PACKAGES FROM ONE CABAL FILE
+  # ==========================================================================
+  #
+  # llmq-grace links Grace, and that closure keeps a reference to the
+  # compiler: 4.6 GB, measured 2026-09-23. Nothing that size goes to a Pi.
+  # So the cabal file puts that executable behind the `grace` flag, off by
+  # default:
+  #
+  #   pkgs.open-slop.llmq        llmq and the gateway, no Grace, small
+  #   pkgs.open-slop.llmq-grace  the stage runner, with Grace, large
+  #
+  # The generated derivation is made with the flag ON (`cabal2nix --flag
+  # grace`), so Grace is in the dependency list for both; the flag-off build
+  # does not link it, and Grace being a build input costs time rather than
+  # closure.
   #
   # ==========================================================================
   # OUTPUTS A CONSUMER USES
   # ==========================================================================
   #
-  #   overlays.default            pkgs.open-slop.{llmq,catalogue,
+  #   overlays.default            pkgs.open-slop.{llmq,llmq-grace,catalogue,
   #                               llama-cpp-prismml,bonsai,grace}
   #   nixosModules.default        every server-side module; inert until a
   #                               services.open-slop.* option enables something
   #   homeManagerModules.default  programs.llmq
   #   lib.catalogue               the catalogue as data
   #
-  # pkgs.open-slop.llmq carries both executables, bin/llmq and
-  # bin/open-slop-gateway, because they are one cabal package.
-  #
   # THE CONSUMER ADDS THE OVERLAY. The modules do not set nixpkgs.overlays
-  # themselves: a home-manager configuration running with useGlobalPkgs
-  # rejects nixpkgs.overlays from a module, and the same overlay set twice
-  # (once by a module, once by the consumer) would apply it twice. So the
-  # contract is two lines: add overlays.default to the package set, import
-  # the modules.
+  # themselves: home-manager under useGlobalPkgs rejects that from a module.
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -45,7 +54,7 @@
     # reaches the gateway instead of api.openai.com. A path while it is
     # iterated on beside this repo; a forge URL once it is pushed.
     grace = {
-      url = "github:harryprayiv/grace";
+      url = "path:/home/bismuth/git/grace";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -66,8 +75,6 @@
     let
       compiler = "ghc96";
 
-      # Defined once, outside eachDefaultSystem, so a consumer can apply it
-      # on any system.
       overlay =
         final: prev:
         let
@@ -93,11 +100,18 @@
           open-slop = {
             catalogue = import ./catalogue;
 
-            # The binaries the fleet installs. No haddock: nothing on a row
-            # reads llmq's API documentation, and haddock was the longest
-            # single-threaded phase of the first native build on oracle.
-            # The dev shell and `checks` still build the full package.
+            # What the fleet gets: llmq and the gateway, the `grace` flag at
+            # its default of off, so nothing here links Grace and
+            # justStaticExecutables' GHC check passes as it should.
             llmq = hlib.justStaticExecutables (hlib.dontHaddock hpkgs.open-slop);
+
+            # The Grace stage runner. The GHC check is off because it cannot
+            # pass; the size is the known cost of linking Grace, and this is
+            # a workstation tool, never part of a row's closure.
+            llmq-grace = hlib.overrideCabal (
+              hlib.justStaticExecutables (hlib.dontHaddock (hlib.enableCabalFlag hpkgs.open-slop "grace"))
+            ) (_: { disallowGhcReference = false; });
+
             grace = hlib.justStaticExecutables (hlib.dontHaddock hpkgs.grace);
 
             llama-cpp-prismml = final.callPackage ./nix/packages/llama-cpp-prismml.nix {
@@ -154,6 +168,7 @@
         packages = {
           default = pkgs.open-slop.llmq;
           llmq = pkgs.open-slop.llmq;
+          llmq-grace = pkgs.open-slop.llmq-grace;
           grace = pkgs.open-slop.grace;
           llama-cpp-prismml = pkgs.open-slop.llama-cpp-prismml;
         }
@@ -177,16 +192,36 @@
 
           # Regenerates nix/open-slop.nix from haskell/open-slop.cabal. Run
           # after editing the cabal file; commit the result.
+          #
+          # --flag grace, so the generated dependency list includes Grace:
+          # without it the llmq-grace derivation, which turns the flag on,
+          # configures with a dependency the package set was never told
+          # about and fails with "missing or private dependencies: grace".
+          #
+          # The configureFlags line cabal2nix writes for that flag is then
+          # removed, because it would turn the flag on for EVERY build from
+          # this derivation, including the fleet's llmq, which would link
+          # Grace and drag the compiler into a Pi's closure. The flag is
+          # turned on per package by enableCabalFlag in the overlay.
           cabal2nix = {
             type = "app";
             program = toString (
               pkgs.writeShellScript "open-slop-cabal2nix" ''
                 set -euo pipefail
                 cd "$(git rev-parse --show-toplevel)"
-                ${pkgs.cabal2nix}/bin/cabal2nix ./haskell > nix/open-slop.nix.new
+                ${pkgs.cabal2nix}/bin/cabal2nix --flag grace ./haskell > nix/open-slop.nix.new
                 # cabal2nix writes src = ./haskell (or ./. when run from inside
                 # it); this file lives in nix/, one directory over.
                 sed -i -E 's@src = \./(haskell|\.);@src = ../haskell;@' nix/open-slop.nix.new
+                sed -i -E '/^  configureFlags = \[ "-fgrace" \];$/d' nix/open-slop.nix.new
+                if grep -q 'fgrace' nix/open-slop.nix.new; then
+                  echo "cabal2nix wrote the grace flag somewhere unexpected; check nix/open-slop.nix.new" >&2
+                  exit 1
+                fi
+                if ! grep -q '^, grace,\|[ ,]grace[ ,]' nix/open-slop.nix.new; then
+                  echo "grace is missing from the generated dependency list" >&2
+                  exit 1
+                fi
                 mv nix/open-slop.nix.new nix/open-slop.nix
                 echo "wrote nix/open-slop.nix"
               ''
@@ -199,7 +234,7 @@
         };
 
         devShells.default = hpkgs.shellFor {
-          packages = _: [ hpkgs.open-slop ];
+          packages = _: [ (hpkgs.open-slop.override { }) ];
 
           nativeBuildInputs = with hpkgs; [
             cabal-install
