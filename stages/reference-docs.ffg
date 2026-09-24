@@ -8,6 +8,10 @@
 #
 # The key and the model come from the runner, not from here, so this file
 # works against any gateway and holds no secret.
+#
+# The field naming the file is `path`. Grace's lexer registers `file` as a
+# URI scheme, next to `http` and `env`, so a label `file:` starts an import
+# and the parse fails at that token, in a value or in a type.
 
 \args ->
 
@@ -21,7 +25,7 @@ prompt
       State only what the text shows. Do not invent options, units, or
       behaviour. Quote identifiers exactly as written.
 
-      file: the path as the marker gives it.
+      path: the file path as the marker gives it.
       purpose: one or two sentences on what the file is for.
       interface: the options, packages, units, files, ports, mounts, users
       and firewall rules it declares or reads. One per entry.
@@ -36,13 +40,4 @@ prompt
       ${args.source}
       "
   }
-  : { files:
-        List
-          { file: Text
-          , purpose: Text
-          , interface: List Text
-          , behaviour: List Text
-          , reasoning: List Text
-          , openQuestions: List Text
-          }
-    }
+  : { files: List { path: Text, purpose: Text, interface: List Text, behaviour: List Text, reasoning: List Text, openQuestions: List Text } }

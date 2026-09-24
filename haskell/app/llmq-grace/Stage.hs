@@ -28,9 +28,13 @@ import OpenSlop.Grace.Docs (Docs, FileDoc)
 -- | What every stage is given for one part. The key and the model are
 -- passed in rather than read by the Grace file, so one stage file works
 -- against any gateway and no key is written in a program.
+--
+-- The model is Maybe Text because Grace's own prompt record types its
+-- model field as Optional Text, and a stage passing args.model straight
+-- through fails to type-check against a plain Text.
 data PartArgs = PartArgs
   { key :: Key
-  , model :: Text
+  , model :: Maybe Text
   , path :: Text
   -- ^ the file this part covers, or the first of them
   , source :: Text

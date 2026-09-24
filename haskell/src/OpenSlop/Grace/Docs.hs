@@ -6,6 +6,10 @@
 -- constrained to a schema by the server, decoded against this type by Grace,
 -- and checked for coverage here. Nothing downstream parses prose.
 --
+-- The field naming the file is `path`, not `file`. Grace's lexer treats
+-- `file` as a URI scheme, the same as `http` and `env`, so a record label
+-- `file:` starts an import and the stage fails to parse at that token.
+--
 -- The Grace instances are NOT here: this module is in the library, which
 -- does not depend on Grace, so that the rendering and the coverage check can
 -- be tested without building Grace. The orphan instances live beside the
@@ -26,7 +30,7 @@ import GHC.Generics (Generic)
 -- rather than Markdown, so the rendering here decides the shape of the
 -- document and the model only supplies facts.
 data FileDoc = FileDoc
-  { file :: Text
+  { path :: Text
   -- ^ the path as the part's marker gives it
   , purpose :: Text
   , interface :: [Text]
@@ -50,7 +54,7 @@ newtype Docs = Docs {files :: [FileDoc]}
 missingFiles :: [Text] -> Docs -> [Text]
 missingFiles starts (Docs fs) = filter (not . covered) starts
   where
-    named = map (\f -> T.strip f.file) fs
+    named = map (\f -> T.strip f.path) fs
     covered s =
       let base = T.takeWhileEnd (/= '/') s
        in any (\n -> n == s || n == base || T.isSuffixOf base n) named
@@ -63,7 +67,7 @@ renderDocs (Docs fs) = T.intercalate "\n" (map one fs)
   where
     one f =
       T.unlines
-        ( ["## " <> f.file, "", f.purpose, ""]
+        ( ["## " <> f.path, "", f.purpose, ""]
             <> section "Interface" f.interface
             <> section "Behaviour" f.behaviour
             <> section "Reasoning" f.reasoning

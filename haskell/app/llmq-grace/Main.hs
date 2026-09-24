@@ -184,7 +184,7 @@ runParts stage key model job = do
     let args =
           PartArgs
             { key
-            , model
+            , model = Just model
             , path = fromMaybe (fromMaybe "" m.continues) (headMay m.starts)
             , source = body
             , part = m.index

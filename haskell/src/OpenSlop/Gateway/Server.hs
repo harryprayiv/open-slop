@@ -31,7 +31,7 @@ import Data.ByteString.Char8 qualified as BC
 import Data.ByteString.Lazy qualified as BL
 import Data.IORef
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -159,6 +159,10 @@ chat env who req = do
       t1 <- getPOSIXTime
       let wall = floor (t1 - t0) :: Int
           inputBytes = sum [BC.length (TE.encodeUtf8 m.content) | m <- r.messages]
+          constrained = case r.responseFormat of
+            Just FormatJsonSchema {} -> True
+            Just FormatJsonObject -> True
+            _ -> False
       case res of
         Left (Transport why) -> failed wall (ApiError 502 "api_error" (Just "backend_unreachable") (targetId t <> ": " <> why))
         Left (Status code body)
@@ -166,11 +170,27 @@ chat env who req = do
           | otherwise -> failed wall (invalidRequest (Just "backend_rejected") (targetId t <> " answered " <> tshow code <> ": " <> TE.decodeUtf8With TE.lenientDecode body))
         Right body -> case parseBackendReply t.backend.engine body of
           Left why -> failed wall (ApiError 502 "api_error" (Just "backend_error") (targetId t <> ": " <> why))
+          -- A schema-constrained answer that stopped at the token cap is
+          -- incomplete JSON by construction: the grammar was still inside
+          -- a string or an object when the budget ran out. Returning it
+          -- 200 leaves the client with a decode error and no cause, so it
+          -- is a refusal here, naming the cap. Measured on a 0.5B, which
+          -- repeated one sentence until it hit 2048 tokens.
+          Right reply
+            | constrained && reply.finish == FinishLength ->
+                failed
+                  wall
+                  ( invalidRequest
+                      (Just "length_before_schema_complete")
+                      ( targetId t <> " stopped at its " <> tshow c.predict
+                          <> "-token output cap with the schema unfinished, so the answer is not valid JSON. Send fewer input bytes, raise max_completion_tokens, or use a model that does not repeat itself."
+                      )
+                  )
           Right reply -> case judge (withPredict c.predict t.budget) 0 inputBytes wall (finalInfo reply) of
             Truncated why -> failed wall (invalidRequest (Just "context_length_exceeded") (targetId t <> ": " <> why))
             Kept st -> do
               n <- atomicModifyIORef' env.counter (\i -> (i + 1, i + 1))
-              let estimated = reply.promptTokens == Nothing
+              let estimated = not (isJust reply.promptTokens)
                   promptTokens = fromMaybe (ceiling (fromIntegral inputBytes / t.budget.bytesPerToken :: Double)) reply.promptTokens
                   completionTokens = fromMaybe 0 reply.completionTokens
                   resp =
