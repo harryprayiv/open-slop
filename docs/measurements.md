@@ -23,6 +23,23 @@ the prompt grows; prefill by 2.5x and decode by 3x across this range.
 Per-file total for the four files: 2748 s, every file documented. Packed:
 2399 s, one file documented. Per-file is the default from this date.
 
+### The prompt experiment that failed, 2026-09-20
+
+Same input, same model, same packed part, with a rule added to the prompt:
+"Every file in the part gets its own section, in the order the files
+appear. Do not stop before the last file."
+
+| run | output tokens | files documented |
+|---|---|---|
+| before the rule | 522 | 1 of 4 |
+| after the rule | 485 | 1 of 4 |
+
+Both stopped on their own at about a quarter of the 2048-token cap. The
+instruction did not move the model; the chunker did. This is the evidence
+behind one-file-per-part being structural rather than a prompt fix, and the
+reason sampling is now deterministic (temperature 0.0, fixed seed): without
+it, two runs differ and no prompt change can be judged.
+
 ### Inference, other models
 
 | model | pack | prompt | pp tok/s | tg tok/s | command | date |
@@ -69,3 +86,37 @@ signal between a good answer and garbage.
 |---|---|---|---|
 | activation after a nixpkgs bump, before 2026-09-20's fixes | about twelve minutes | seed unit wiped the Hailo blobs on a store-path stamp change; pull unit refetched 9 GB | version stamp; /api/tags guard |
 | activation after the fixes | four seconds | five "already present" | |
+
+## winsmuth: the Grace chain against a local ollama
+
+Not fleet hardware. These numbers exist because oracle was unreachable for a
+week, and they measure the machinery rather than the model. Model:
+qwen2.5:0.5b, 397 MB, through open-slop-gateway on loopback.
+
+### llmq-grace end to end, 2026-09-23
+
+| part | bytes | prompt tokens | completion tokens | wall | result |
+|---|---|---|---|---|---|
+| genkey.nix alone | 1350 | 691 | 177 | 7 s | a well-formed Docs value, exit 0, no coverage warning |
+| default.nix alone | 19860 | 4903 | 2048 (the cap) | 82 s | refused: the model repeated one sentence until the cap, so the JSON stopped mid-string |
+
+The second row is why the gateway now answers a schema-constrained request
+that ends at the token cap with 400 `length_before_schema_complete` instead
+of a 200 the client cannot decode: under grammar-constrained decoding, an
+answer that hits the cap is inside a string or an object when the budget
+runs out, and cannot be valid JSON.
+
+The content at 0.5B is worthless and the structure is perfect, which is the
+result the design predicts: `interface` came back as the prompt's own
+category words, `reasoning` contained a confident falsehood about where a
+key is written, and every layer reported success.
+
+### Package closures, 2026-09-23
+
+| output | binaries | closure | why |
+|---|---|---|---|
+| `pkgs.open-slop.llmq` | llmq, open-slop-gateway | 85.8 MiB | justStaticExecutables, no Grace |
+| `pkgs.open-slop.llmq-grace` | all three | 4.6 GiB | Grace's closure keeps a reference to ghc-9.6.7; `nix why-depends --precise` found it in the package's own shared object before the split, and in a binary after |
+
+The `grace` cabal flag is what keeps the first number small. See HANDOFF
+section 4.
