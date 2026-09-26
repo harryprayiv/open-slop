@@ -21,6 +21,7 @@
 -- ============================================================================
 --
 --   subjectKnown      a claim about something not in this part
+--   statementComplete a sentence the grammar's length bound cut off
 --   evidenceResolves  a quote that is not in the source: an invented fact
 --   evidenceIsApt     a quote sharing no name with its statement, which is
 --                     how a colon-ended lead-in gets cited for the lines
@@ -158,18 +159,25 @@ data Verdict = Verdict
   deriving stock (Show, Generic)
   deriving anyclass (ToJSON)
 
+-- ---------------------------------------------------------------------------
+-- The schema
+
 -- | The JSON Schema for a list of claims about one subject list.
 --
 -- minItems and maxItems make coverage a property of the grammar rather
 -- than a warning afterwards: measured 2026-09-26, the same model that
 -- documented one file of two without them documented both with them.
 --
--- maxLength on the statement, after the run of 2026-09-26 in which the
--- instruction said "ONE sentence, at most thirty words" and the model
--- wrote a sixty-word sentence, then kept going until the 700-token cap,
--- four subjects in a row, producing one claim each and no valid JSON. A
--- rule a model can ignore is not a constraint. 220 characters is about
--- thirty words and the grammar makes anything longer unreachable.
+-- maxLength on the statement, after a run in which the instruction said
+-- "at most thirty words" and the model wrote sixty and kept going to the
+-- token cap, four subjects in a row, producing no valid JSON at all. A
+-- rule a model can ignore is not a constraint. The bound does not steer
+-- the model, it cuts it off, which is why a truncated sentence is rejected
+-- below.
+--
+-- The bounds cost nothing: measured warm, the same request with no bound,
+-- a 60-character bound and a 220-character bound all took 25 seconds and
+-- returned the same answer.
 --
 -- There is no confidence field. It used to be the model's to choose, and
 -- requiring kind=reason to carry confidence=stated taught the model to
@@ -259,6 +267,15 @@ identifiersIn t =
         -- that announces a message format instead of the format itself.
         || (T.any isDigit w && T.any isAlpha w)
 
+-- | Whether a statement finished. Under a grammar with maxLength a model
+-- that starts a long sentence is cut off rather than steered: measured
+-- 2026-09-26, a claim came back ending in the word "maintaining". Half a
+-- sentence reads like a claim until its last word.
+endsSentence :: Text -> Bool
+endsSentence t = case T.unsnoc (T.stripEnd t) of
+  Just (_, c) -> c `elem` ('.' : "!?")
+  Nothing -> False
+
 -- | Runs of whitespace collapsed to one space, so a quote copied across a
 -- line break or with the indentation dropped still matches.
 normalise :: Text -> Text
@@ -304,6 +321,8 @@ verify subjects raws = go Set.empty raws (Verdict [] [])
     check seen r
       | Set.member (fingerprint r) seen = Left "duplicate of an earlier claim"
       | T.null (T.strip r.statement) = Left "empty statement"
+      | not (endsSentence r.statement) =
+          Left "the statement was cut off before its end, so the schema's length bound is too tight for what it tried to say"
       | otherwise = case Map.lookup r.subject table of
           Nothing -> Left ("subject " <> r.subject <> " is not one of the subjects for this part")
           Just src -> do
@@ -327,7 +346,7 @@ verify subjects raws = go Set.empty raws (Verdict [] [])
                         , evidence = ev
                         , statement = T.strip r.statement
                         , confidence = conf
-                        , passed = ["subjectKnown", "evidenceResolves", "evidenceIsApt", "identifiersKnown", "reasonIsStated", "notDuplicate"]
+                        , passed = ["subjectKnown", "statementComplete", "evidenceResolves", "evidenceIsApt", "identifiersKnown", "reasonIsStated", "notDuplicate"]
                         }
 
     -- A quote must share at least one code-shaped name with its statement,
@@ -363,9 +382,10 @@ verify subjects raws = go Set.empty raws (Verdict [] [])
     -- its prefix, because models abbreviate whatever the instruction says,
     -- with at least twenty characters left so "a..." matches nothing.
     --
-    -- Still rejected, from that run: an invented second openssl call, a
-    -- quote missing the closing brace of a Nix escape, and a quote taken
-    -- from a different file in the same bundle.
+    -- Still rejected, across four runs: an invented second openssl call
+    -- (three times, the most stable model failure here), a quote missing
+    -- the closing brace of a Nix escape, and a quote taken from a
+    -- different file in the same bundle.
     one src q =
       let src' = normalise src
           q0 = normalise (T.strip q)
