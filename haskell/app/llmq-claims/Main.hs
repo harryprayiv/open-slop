@@ -3,24 +3,32 @@
 -- The shape this project arrived at after measuring, on 2026-09-26, that:
 --
 --   * a server reuses the KV cache of a shared prefix (ollama 219 s cold
---     against 5.6 s warm; llama-server with cache_prompt 1.0 s warm), so
---     sending the whole part once and asking many small questions against
---     it is affordable;
+--     against 5.6 s warm; llama-server with cache_prompt 1.0 s warm, and
+--     the cache survives across client processes), so sending the whole
+--     part once and asking many small questions against it is affordable;
 --   * minItems in the schema makes coverage a property of the grammar, so
 --     a model cannot answer about one subject when asked about two;
 --   * constrained decoding costs nothing against free text (1.03 against
 --     1.005 tok/s), so there is no reason to generate prose;
---   * decode is the whole cost at about 1 tok/s, so the design goal is
---     fewer output tokens rather than fewer input tokens.
+--   * decode is the whole cost, 0.75 tok/s at 8K of context under a
+--     grammar, so the design goal is fewer output tokens rather than fewer
+--     input tokens. The token cap is also the wall clock: 450 tokens is
+--     ten minutes.
 --
 -- Hence: the bundle goes in front of every request unchanged, each request
 -- asks about one subject, and the answer is a short list of claims that
 -- quote the source. Prose is rendered here from the accepted claims. The
 -- model writes one sentence per claim and nothing else.
 --
--- The endpoint is llama-server's OpenAI route directly, or the gateway,
--- which speaks the same dialect. cache_prompt is sent either way: the
--- gateway passes it through and ollama ignores it.
+-- ============================================================================
+-- A TRUNCATED ANSWER IS A FAILURE, NOT AN EMPTY RESULT
+-- ============================================================================
+--
+-- Under a grammar, an answer that stops at the token cap is incomplete
+-- JSON by construction: the decoder was inside a string when the budget
+-- ran out. That is reported here with the finish reason and the start of
+-- what did arrive, because the first version of this program logged "0
+-- claims" and left no way to tell a truncation from a refusal.
 module Main (main) where
 
 import Control.Monad (forM, forM_, unless, when)
@@ -41,6 +49,7 @@ import OpenSlop.Chunk (fileMarker)
 import OpenSlop.Claim
 import OpenSlop.Gateway.Translate (Reply (..), parseBackendReply)
 import OpenSlop.Http
+import OpenSlop.OpenAI (FinishReason (..))
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Exit
@@ -72,8 +81,8 @@ optsP =
     <*> strOption (long "input" <> short 'i' <> metavar "FILE" <> help "a catsrc dump: files separated by Start of / End of markers")
     <*> strOption (long "out" <> short 'o' <> metavar "DIR" <> value "claims-out" <> showDefault)
     <*> option auto (long "min-claims" <> metavar "N" <> value 2 <> showDefault <> help "the schema's minItems: the model cannot return fewer")
-    <*> option auto (long "max-claims" <> metavar "N" <> value 6 <> showDefault)
-    <*> option auto (long "max-tokens" <> metavar "N" <> value 700 <> showDefault <> help "output cap per subject; at 1 tok/s this is also the per-subject time in seconds")
+    <*> option auto (long "max-claims" <> metavar "N" <> value 4 <> showDefault)
+    <*> option auto (long "max-tokens" <> metavar "N" <> value 900 <> showDefault <> help "output cap per subject; at 0.75 tok/s this is also the per-subject time, so 900 is about twenty minutes")
     <*> optional (strOption (long "instruction" <> metavar "FILE"))
     <*> option auto (long "timeout" <> short 't' <> metavar "SECS" <> value 3600 <> showDefault)
     <*> optional (strOption (long "only" <> metavar "SUBSTR" <> help "run only subjects whose name contains this"))
@@ -119,17 +128,34 @@ main = do
         say ("  FAILED after " <> tshow (t1 - t0) <> "s: " <> describeFailure f)
         pure (s, Verdict [] [], t1 - t0, 0)
       Right reply -> do
-        let raws = either (const []) id (parseClaims reply.content)
-            v = verify subjects raws
-            outTok = fromMaybe 0 reply.completionTokens
-        say
-          ( "  " <> tshow (t1 - t0) <> "s, " <> tshow outTok <> " output tokens, "
-              <> tshow (length raws) <> " claims, " <> tshow (length v.accepted) <> " accepted, "
-              <> tshow (length v.rejected) <> " rejected"
-          )
-        forM_ v.rejected \(_, why) -> say ("  rejected: " <> why)
-        BL.writeFile (o.outDir </> T.unpack (slug s.name) <> ".json") (encode v)
-        pure (s, v, t1 - t0, outTok)
+        let outTok = fromMaybe 0 reply.completionTokens
+            finished = case reply.finish of
+              FinishStop -> "stop"
+              FinishLength -> "length"
+        case parseClaims reply.content of
+          Left e -> do
+            -- Under a grammar this is almost always the token cap: the
+            -- decoder was inside a string when the budget ran out, so the
+            -- JSON cannot be complete. Saying so beats reporting no claims.
+            say ("  " <> tshow (t1 - t0) <> "s, " <> tshow outTok <> " output tokens, finish=" <> finished)
+            say
+              ( if reply.finish == FinishLength
+                  then "  the answer hit the " <> tshow o.maxTokens <> "-token cap with the schema unfinished, so it is not valid JSON. Raise --max-tokens, or lower --max-claims, or ask for shorter quotes."
+                  else "  the answer did not parse: " <> T.pack e
+              )
+            say ("  first 200 characters: " <> T.take 200 reply.content)
+            BL.writeFile (o.outDir </> T.unpack (slug s.name) <> ".raw.json") (BL.fromStrict (TE.encodeUtf8 reply.content))
+            pure (s, Verdict [] [], t1 - t0, outTok)
+          Right raws -> do
+            let v = verify subjects raws
+            say
+              ( "  " <> tshow (t1 - t0) <> "s, " <> tshow outTok <> " output tokens, finish=" <> finished <> ", "
+                  <> tshow (length raws) <> " claims, " <> tshow (length v.accepted) <> " accepted, "
+                  <> tshow (length v.rejected) <> " rejected"
+              )
+            forM_ v.rejected \(_, why) -> say ("  rejected: " <> why)
+            BL.writeFile (o.outDir </> T.unpack (slug s.name) <> ".json") (encode v)
+            pure (s, v, t1 - t0, outTok)
 
   let allAccepted = concat [v.accepted | (_, v, _, _) <- results]
       allRejected = concat [v.rejected | (_, v, _, _) <- results]
@@ -199,6 +225,9 @@ splitSubjects t = go Nothing [] (T.lines t)
     close Nothing _ = []
     close (Just (f, body)) _ = [Subject {name = f, source = T.unlines (reverse body)}]
 
+-- | Quotes are the expensive part of the budget, so the instruction caps
+-- their length. Measured 2026-09-26: three claims with unbounded quotes
+-- overran a 450-token cap before the array closed.
 defaultInstruction :: Text
 defaultInstruction =
   T.unlines
@@ -207,11 +236,11 @@ defaultInstruction =
     , "Each claim has:"
     , "  subject:    exactly the subject named below."
     , "  kind:       purpose, interface, behaviour, reason, or openIssue."
-    , "  quotes:     one to three fragments copied CHARACTER FOR CHARACTER from that subject's text. A quote that is not in the text is rejected."
-    , "  statement:  one sentence, stating what the quotes show. Use only names that appear in the text."
+    , "  quotes:     ONE fragment, at most fifteen words, copied CHARACTER FOR CHARACTER from that subject's text. A quote that is not in the text is rejected. Never abbreviate a quote with an ellipsis."
+    , "  statement:  ONE sentence, at most thirty words, stating what the quote shows. Use only names that appear in the text."
     , "  confidence: stated when the text says it outright, inferred when you are reading between lines, unclear when you are unsure."
     , ""
-    , "Do not describe the source in general terms. Do not repeat a claim. Do not mention anything that is not in the text."
+    , "Prefer few precise claims to many vague ones. Do not describe the source in general terms. Do not repeat a claim. Do not mention anything that is not in the text."
     ]
 
 slug :: Text -> Text

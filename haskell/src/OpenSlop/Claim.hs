@@ -26,7 +26,7 @@
 --                    signature of an invented fact
 --   identifiersKnown a statement naming a function, option or unit that
 --                    appears nowhere in the source: the most common and
---                    most damaging failure mode, caught by a set lookup
+--                    most damaging failure mode, caught by a substring test
 --   notDuplicate     the same claim twice, which small models do under a
 --                    schema that asks for a list
 --
@@ -229,9 +229,19 @@ verify :: [Subject] -> [RawClaim] -> Verdict
 verify subjects raws = go Set.empty raws (Verdict [] [])
   where
     table = Map.fromList [(s.name, s.source) | s <- subjects]
-    -- Every token that occurs anywhere in this part, plus the subject
-    -- names themselves.
-    known = Set.unions (map (identifiersIn . (.source)) subjects <> [Set.fromList (map (.name) subjects)])
+
+    -- The haystack every identifier in a statement is looked for in: the
+    -- whole part, lower-cased, plus the subject names.
+    --
+    -- Substring rather than token membership, and case-insensitive, after
+    -- 2026-09-26: tokenising the source rejected "OpenSSL" because the
+    -- source says "openssl", and rejected "homebeacon-key.pem" because the
+    -- source says "$out/homebeacon-key.pem" and the tokeniser kept the
+    -- prefix. Both claims were true. The looser test still catches the
+    -- failure that matters, a name that is nowhere in the text at all.
+    haystack = T.toLower (T.intercalate "\n" (map (.source) subjects <> map (.name) subjects))
+
+    isKnown w = T.isInfixOf (T.toLower w) haystack
 
     go _ [] v = v {accepted = reverse v.accepted, rejected = reverse v.rejected}
     go seen (r : rest) v = case check seen r of
@@ -247,7 +257,7 @@ verify subjects raws = go Set.empty raws (Verdict [] [])
           Nothing -> Left ("subject " <> r.subject <> " is not one of the subjects for this part")
           Just src -> do
             ev <- locate src r.quotes
-            let unknown = Set.toList (Set.difference (identifiersIn r.statement) known)
+            let unknown = filter (not . isKnown) (Set.toList (identifiersIn r.statement))
             if not (null unknown)
               then Left ("the statement names " <> T.intercalate ", " (take 4 unknown) <> ", which appears nowhere in this part")
               else
