@@ -158,21 +158,24 @@ data Verdict = Verdict
   deriving stock (Show, Generic)
   deriving anyclass (ToJSON)
 
--- ---------------------------------------------------------------------------
--- The schema
-
 -- | The JSON Schema for a list of claims about one subject list.
 --
 -- minItems and maxItems make coverage a property of the grammar rather
 -- than a warning afterwards: measured 2026-09-26, the same model that
 -- documented one file of two without them documented both with them.
 --
+-- maxLength on the statement, after the run of 2026-09-26 in which the
+-- instruction said "ONE sentence, at most thirty words" and the model
+-- wrote a sixty-word sentence, then kept going until the 700-token cap,
+-- four subjects in a row, producing one claim each and no valid JSON. A
+-- rule a model can ignore is not a constraint. 220 characters is about
+-- thirty words and the grammar makes anything longer unreachable.
+--
 -- There is no confidence field. It used to be the model's to choose, and
 -- requiring kind=reason to carry confidence=stated taught the model to
 -- avoid both labels: every claim in that run came back inferred, several
 -- quoting comments that state the fact outright, and not one was labelled
--- a reason. A constraint a model can evade by relabelling is a tax on the
--- honest path. Confidence is derived from where the quote landed.
+-- a reason. Confidence is derived from where the quote landed.
 claimSchema :: [Text] -> (Int, Int) -> Value
 claimSchema subjects (lo, hi) =
   object
@@ -200,9 +203,17 @@ claimSchema subjects (lo, hi) =
                                     -- anything is not a reachable token under the
                                     -- grammar rather than something the checker
                                     -- removes after the tokens are paid for.
-                                    "items" .= object ["type" .= ("string" :: Text), "minLength" .= (12 :: Int)]
+                                    -- maxLength for the same reason in the other
+                                    -- direction: a quote is fifteen words, not a
+                                    -- transcription of the file.
+                                    "items"
+                                      .= object
+                                        [ "type" .= ("string" :: Text)
+                                        , "minLength" .= (12 :: Int)
+                                        , "maxLength" .= (120 :: Int)
+                                        ]
                                   ]
-                            , "statement" .= object ["type" .= ("string" :: Text)]
+                            , "statement" .= object ["type" .= ("string" :: Text), "minLength" .= (20 :: Int), "maxLength" .= (220 :: Int)]
                             ]
                       , "required" .= (["subject", "kind", "quotes", "statement"] :: [Text])
                       , "additionalProperties" .= False

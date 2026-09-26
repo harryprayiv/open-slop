@@ -1,39 +1,43 @@
 -- | llmq-claims: one call per subject, evidence-checked claims out.
 --
--- The shape this project arrived at after measuring, on 2026-09-26, that:
+-- ============================================================================
+-- WHAT THE MEASUREMENTS OF 2026-09-26 DECIDED ABOUT THIS SHAPE
+-- ============================================================================
 --
---   * a server reuses the KV cache of a shared prefix (ollama 219 s cold
---     against 5.6 s warm; llama-server with cache_prompt 1.0 s warm, and
---     the cache survives across client processes), so sending the whole
---     part once and asking many small questions against it is affordable;
---   * minItems in the schema makes coverage a property of the grammar, so
---     a model cannot answer about one subject when asked about two;
---   * constrained decoding costs nothing against free text (1.03 against
---     1.005 tok/s), so there is no reason to generate prose;
---   * decode is the whole cost, 0.73 tok/s at 8K of context under a
---     grammar, so the design goal is fewer output tokens rather than fewer
---     input tokens. The token cap is also the wall clock: 700 tokens is
---     about sixteen minutes.
---
--- Hence: the bundle goes in front of every request unchanged, each request
--- asks about one subject, and the answer is a short list of claims that
--- quote the source. Prose is rendered here from the accepted claims. The
--- model writes one sentence per claim and nothing else.
+--   * A server reuses the KV cache of a shared prefix, and the reuse is
+--     nearly total: a 4,688-token bundle with a different question on the
+--     end came back with 4,675 tokens cached and 4.9 s of prefill, against
+--     about 220 s cold. So the bundle goes in front of every request and is
+--     paid for once.
+--   * That cold cost is what every long failure here has been. A warm-up
+--     request now runs before the loop and reports what it cost, and the
+--     default timeout is ten minutes rather than an hour, so a stall shows
+--     up while you are still watching.
+--   * minItems in the schema makes coverage a property of the grammar.
+--   * Constrained decoding costs nothing against free text.
+--   * maxLength costs nothing either: warm, the same request with no bound,
+--     a 60-character bound and a 220-character bound all took 25 s and
+--     returned the same answer.
+--   * Decode is the whole cost, about 0.7 tok/s at 8K of context, so the
+--     token cap is also the wall clock and the design goal is fewer output
+--     tokens rather than fewer input tokens.
 --
 -- ============================================================================
 -- A TRUNCATED ANSWER IS A FAILURE, NOT AN EMPTY RESULT
 -- ============================================================================
 --
--- Under a grammar, an answer that stops at the token cap is incomplete
--- JSON by construction: the decoder was inside a string when the budget
--- ran out. That is reported here with the finish reason and the start of
--- what did arrive, because the first version of this program logged "0
--- claims" and left no way to tell a truncation from a refusal.
+-- Under a grammar, an answer that stops at the token cap is incomplete JSON
+-- by construction: the decoder was inside a string when the budget ran out.
+-- That is reported with the finish reason and the start of what arrived,
+-- because an earlier version logged "0 claims" and left no way to tell a
+-- truncation from a refusal.
 module Main (main) where
 
 import Control.Monad (forM, forM_, unless, when)
 import Data.Aeson (Value, eitherDecode, encode, object, withObject, (.:), (.=))
 import Data.Aeson qualified as Aeson
+import Data.Aeson.Key qualified as Key
+import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Aeson.Types (parseEither)
 import Data.ByteString qualified as B
 import Data.ByteString.Lazy qualified as BL
@@ -81,10 +85,10 @@ optsP =
     <*> strOption (long "input" <> short 'i' <> metavar "FILE" <> help "a catsrc dump: files separated by Start of / End of markers")
     <*> strOption (long "out" <> short 'o' <> metavar "DIR" <> value "claims-out" <> showDefault)
     <*> option auto (long "min-claims" <> metavar "N" <> value 2 <> showDefault <> help "the schema's minItems: the model cannot return fewer")
-    <*> option auto (long "max-claims" <> metavar "N" <> value 4 <> showDefault)
-    <*> option auto (long "max-tokens" <> metavar "N" <> value 700 <> showDefault <> help "output cap per subject; at 0.73 tok/s this is also the per-subject time, so 700 is about sixteen minutes")
+    <*> option auto (long "max-claims" <> metavar "N" <> value 3 <> showDefault)
+    <*> option auto (long "max-tokens" <> metavar "N" <> value 500 <> showDefault <> help "output cap per subject; at 0.7 tok/s this is also the per-subject time, so 500 is about twelve minutes")
     <*> optional (strOption (long "instruction" <> metavar "FILE"))
-    <*> option auto (long "timeout" <> short 't' <> metavar "SECS" <> value 3600 <> showDefault)
+    <*> option auto (long "timeout" <> short 't' <> metavar "SECS" <> value 600 <> showDefault <> help "per request; a cold prefix cache costs about 220 s on a 5K bundle, so a stall past ten minutes is a stall")
     <*> optional (strOption (long "only" <> metavar "SUBSTR" <> help "run only subjects whose name contains this"))
     <*> switch (long "dry-run" <> short 'n' <> help "list the subjects and the schema, send nothing")
 
@@ -117,30 +121,53 @@ main = do
   client <- newClient
   createDirectoryIfMissing True o.outDir
 
+  -- Warm the server's prefix cache, and say what it cost. Every long
+  -- failure this project has had was that cost hiding inside a request that
+  -- looked hung.
+  do
+    t0 <- now
+    let probe =
+          object
+            ( [ "messages" .= [object ["role" .= ("user" :: Text), "content" .= (bundle <> "\n\n" <> instruction <> "\n\nReply with the word ok.")]]
+              , "max_tokens" .= (4 :: Int)
+              , "temperature" .= (0 :: Int)
+              , "stream" .= False
+              , "cache_prompt" .= True
+              ]
+                <> maybe [] (\m -> ["model" .= m]) o.model
+            )
+    w <- postJsonWithin (Just o.timeoutSeconds) client auth o.endpoint "/v1/chat/completions" probe
+    t1 <- now
+    case w of
+      Left f -> die' ("the endpoint did not answer a warm-up request within " <> tshow o.timeoutSeconds <> "s: " <> describeFailure f)
+      Right raw ->
+        say
+          ( "prefix warmed in " <> tshow (t1 - t0) <> "s: " <> tshow (cachedTokens raw) <> " of "
+              <> tshow (promptTokensOf raw) <> " prompt tokens were already cached"
+          )
+
   results <- forM (zip [1 :: Int ..] subjects) \(i, s) -> do
     say ("subject " <> tshow i <> "/" <> tshow (length subjects) <> ": " <> s.name)
     t0 <- now
     let body = request o bundle instruction subjects s
     r <- postJsonWithin (Just o.timeoutSeconds) client auth o.endpoint "/v1/chat/completions" body
     t1 <- now
-    case r >>= (either (Left . Transport) Right . parseBackendReply LlamaServer) of
+    case r >>= \raw -> (,) raw <$> either (Left . Transport) Right (parseBackendReply LlamaServer raw) of
       Left f -> do
         say ("  FAILED after " <> tshow (t1 - t0) <> "s: " <> describeFailure f)
         pure (s, Verdict [] [], t1 - t0, 0)
-      Right reply -> do
+      Right (raw, reply) -> do
         let outTok = fromMaybe 0 reply.completionTokens
+            cached = cachedTokens raw
             finished = case reply.finish of
               FinishStop -> "stop"
               FinishLength -> "length"
         case parseClaims reply.content of
           Left e -> do
-            -- Under a grammar this is almost always the token cap: the
-            -- decoder was inside a string when the budget ran out, so the
-            -- JSON cannot be complete. Saying so beats reporting no claims.
-            say ("  " <> tshow (t1 - t0) <> "s, " <> tshow outTok <> " output tokens, finish=" <> finished)
+            say ("  " <> tshow (t1 - t0) <> "s, " <> tshow outTok <> " output tokens, " <> tshow cached <> " cached, finish=" <> finished)
             say
               ( if reply.finish == FinishLength
-                  then "  the answer hit the " <> tshow o.maxTokens <> "-token cap with the schema unfinished, so it is not valid JSON. Raise --max-tokens, or lower --max-claims, or ask for shorter quotes."
+                  then "  the answer hit the " <> tshow o.maxTokens <> "-token cap with the schema unfinished, so it is not valid JSON. Raise --max-tokens, or lower --max-claims."
                   else "  the answer did not parse: " <> T.pack e
               )
             say ("  first 200 characters: " <> T.take 200 reply.content)
@@ -149,7 +176,7 @@ main = do
           Right raws -> do
             let v = verify subjects raws
             say
-              ( "  " <> tshow (t1 - t0) <> "s, " <> tshow outTok <> " output tokens, finish=" <> finished <> ", "
+              ( "  " <> tshow (t1 - t0) <> "s, " <> tshow outTok <> " output tokens, " <> tshow cached <> " cached, finish=" <> finished <> ", "
                   <> tshow (length raws) <> " claims, " <> tshow (length v.accepted) <> " accepted, "
                   <> tshow (length v.rejected) <> " rejected"
               )
@@ -207,6 +234,23 @@ request o bundle instruction subjects s =
         <> maybe [] (\m -> ["model" .= m]) o.model
     )
 
+-- | How much of the prompt the server did not have to re-evaluate.
+-- llama-server reports it under usage.prompt_tokens_details.cached_tokens;
+-- a number near the prompt size means the shared prefix held, and a small
+-- one means something evicted it and this request paid the cold cost.
+cachedTokens :: BL.ByteString -> Int
+cachedTokens = fieldUnder ["usage", "prompt_tokens_details", "cached_tokens"]
+
+promptTokensOf :: BL.ByteString -> Int
+promptTokensOf = fieldUnder ["usage", "prompt_tokens"]
+
+fieldUnder :: [Text] -> BL.ByteString -> Int
+fieldUnder path raw = fromMaybe 0 (Aeson.decode raw >>= go path)
+  where
+    go [] (Aeson.Number n) = Just (truncate n)
+    go (k : ks) (Aeson.Object o) = KeyMap.lookup (Key.fromText k) o >>= go ks
+    go _ _ = Nothing
+
 parseClaims :: Text -> Either String [RawClaim]
 parseClaims t = do
   v <- eitherDecode (BL.fromStrict (TE.encodeUtf8 t))
@@ -231,9 +275,9 @@ splitSubjects t = go Nothing [] (T.lines t)
 -- one string, one dropping the closing brace of a Nix ''${ escape, and two
 -- statements using words nowhere in the bundle. The second run added a
 -- seventh: a quote that announced a message format instead of containing
--- it.
---
--- Quotes are also the expensive part of the budget, so they are capped.
+-- it. The third run added an eighth failure, which is now the schema's job
+-- rather than the instruction's: a sixty-word sentence that ran to the
+-- token cap.
 defaultInstruction :: Text
 defaultInstruction =
   T.unlines
@@ -243,7 +287,7 @@ defaultInstruction =
     , "  subject:   exactly the subject named below."
     , "  kind:      purpose, interface, behaviour, reason, or openIssue."
     , "  quotes:    ONE fragment, at most fifteen words, copied CHARACTER FOR CHARACTER from that subject's own text. A quote that is not in that subject is rejected."
-    , "  statement: ONE sentence, at most thirty words, stating what the quote shows. Use only words that appear in the text."
+    , "  statement: ONE sentence, at most 220 characters. The schema enforces this, so say the specific thing rather than starting a general one."
     , ""
     , "Rules that decide whether a claim is kept:"
     , "  Quote only from the subject named below. Other files appear above; their lines are not evidence here."
@@ -253,6 +297,8 @@ defaultInstruction =
     , "  Never abbreviate a quote with an ellipsis."
     , "  A claim of kind reason must quote a COMMENT giving that reason. If no comment gives it, return no reason claim: a rationale you worked out yourself is not the file's reasoning."
     , "  Do not use a word unless it appears in the text. Names of systems, tools or concepts you know from elsewhere are rejected."
+    , ""
+    , "Emit compact JSON with no indentation and no newlines between fields. Whitespace costs output budget and this model produces about forty tokens per minute."
     , ""
     , "Prefer few precise claims to many vague ones. Prefer the least obvious thing in the file to the most obvious. Do not repeat a claim."
     ]
