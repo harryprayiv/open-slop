@@ -1,0 +1,49 @@
+# Golden set for modules/system/homebeacon, second pass 2026-09-26.
+#
+# Judged against the QUOTE, not the sentence. My first pass over run one
+# judged three claims from their statements alone and got all three wrong,
+# which is the failure the evidence field exists to prevent.
+#
+# Run: llmq-claims against qwen2.5-coder 7B on llama-server, min 3, max 4
+# claims per subject, 700-token cap, one request per subject over a shared
+# prefix, with the instruction rules and quote minLength added after run
+# one. 11 claims produced, 11 survived the machine checks, 9 accepted here.
+#
+# Against run one's 16 produced, 8 machine-accepted, 6 human-accepted: the
+# rules moved the MODEL rather than the filter. Fewer claims, better ones,
+# and the machine checks had less to remove because less garbage arrived.
+#
+# One rule backfired. Requiring kind=reason to carry confidence=stated made
+# the model avoid both labels: every claim here is marked inferred, several
+# quoting comments that state the fact outright, and no claim is labelled a
+# reason at all. A constraint a model can evade by relabelling is a tax on
+# the honest path. Confidence should be DERIVED from where the quote landed
+# (comment means stated, code means inferred) rather than chosen.
+#
+# verdict	subject	kind	confidence	statement	evidence
+y	modules/system/homebeacon/default.nix	purpose	stated	The role listens on a port for client challenges, which must match the client's port setting.	LAN-facing port clients send challenges to. Must match roles.homebeaconClient.port on every client
+y	modules/system/homebeacon/default.nix	interface	inferred	The service validates the key at boot using a sign-and-verify round trip.	homebeacon-keycheck.service validates it at every boot with a real sign-and-verify round trip
+y	modules/system/homebeacon/default.nix	behaviour	inferred	The service performs a sign-and-verify round trip to validate the key.	homebeacon-keycheck.service validates it at every boot with a real sign-and-verify round trip
+y	modules/system/homebeacon/genkey.nix	purpose	stated	The script is intended to be run only on the workstation and not on the target system.	Run once, on the workstation, never on the target.
+y	modules/system/homebeacon/genkey.nix	interface	inferred	The script accepts an optional argument for the output directory, defaulting to the current directory if not provided.	out="''${1:-.}"
+y	modules/system/homebeacon/genkey.nix	behaviour	inferred	The script sets the permissions of the public key file to 644.	chmod 644 "$out/homebeacon-pub.pem"
+n	modules/system/homebeacon/keycheck.nix	interface	inferred	The script accepts one argument, which is the path to the home beacon signing key.	homebeacon-keycheck: $1
+y	modules/system/homebeacon/keycheck.nix	interface	inferred	The script uses an environment variable HOMEBEACON_PIN to specify the path to the public key pin.	HOMEBEACON_PIN
+y	modules/system/homebeacon/responder.nix	purpose	stated	The responder implements protocol version 2 as specified in tests/homebeacon.nix.	Protocol v2. tests/homebeacon.nix is the executable spec.
+n	modules/system/homebeacon/responder.nix	behaviour	inferred	The responder signs a message containing the protocol version, nonce, and peer address.	The signed message is exactly:
+y	modules/system/homebeacon/responder.nix	behaviour	inferred	The responder binds the peer address into the signature to prevent relay attacks.	Binding the peer address into the signature is what defeats relay.
+#
+# The two rejections, and what each one asks for next:
+#
+# keycheck "accepts one argument": the quote is the fail-message helper,
+# where $1 is the message being printed. A real quote, read wrongly. No
+# mechanical check can catch this; an entailment model asking "does this
+# quote support this sentence" is the tool, and it is a different model
+# family, so its errors are uncorrelated with the generator's.
+#
+# responder "signs a message containing...": the quote is a colon-ended
+# lead-in and the three fields are on the lines below it. True statement,
+# insufficient evidence. Cheap to catch: require the quote to contain at
+# least one identifier that also appears in the statement, which would have
+# forced it to quote the message format instead of the sentence announcing
+# it.
