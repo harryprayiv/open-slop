@@ -225,15 +225,13 @@ splitSubjects t = go Nothing [] (T.lines t)
     close Nothing _ = []
     close (Just (f, body)) _ = [Subject {name = f, source = T.unlines (reverse body)}]
 
--- | Every rule here was written against a measured rejection from the run
--- of 2026-09-26, which produced sixteen claims of which six were the
--- model's fault:
---
---   two quotes copied from a NEIGHBOURING file in the same bundle;
---   one quote joining three lines into a single string;
---   one quote dropping the closing brace of a Nix ''${ escape;
---   two statements using words that are nowhere in the bundle;
---   two reasons the model supplied rather than found in a comment.
+-- | Every rule here was written against a measured rejection. The run of
+-- 2026-09-26 produced sixteen claims of which six were the model's fault:
+-- two quotes copied from a neighbouring file, one joining three lines into
+-- one string, one dropping the closing brace of a Nix ''${ escape, and two
+-- statements using words nowhere in the bundle. The second run added a
+-- seventh: a quote that announced a message format instead of containing
+-- it.
 --
 -- Quotes are also the expensive part of the budget, so they are capped.
 defaultInstruction :: Text
@@ -242,18 +240,18 @@ defaultInstruction =
     [ "Above is the source text. For the subject named at the end of this message, and for no other subject, return claims about it."
     , ""
     , "Each claim has:"
-    , "  subject:    exactly the subject named below."
-    , "  kind:       purpose, interface, behaviour, reason, or openIssue."
-    , "  quotes:     ONE fragment, at most fifteen words, copied CHARACTER FOR CHARACTER from that subject's own text. A quote that is not in that subject is rejected."
-    , "  statement:  ONE sentence, at most thirty words, stating what the quote shows. Use only words that appear in the text."
-    , "  confidence: stated when the text says it outright, inferred when you are reading between the lines, unclear when you are unsure."
+    , "  subject:   exactly the subject named below."
+    , "  kind:      purpose, interface, behaviour, reason, or openIssue."
+    , "  quotes:    ONE fragment, at most fifteen words, copied CHARACTER FOR CHARACTER from that subject's own text. A quote that is not in that subject is rejected."
+    , "  statement: ONE sentence, at most thirty words, stating what the quote shows. Use only words that appear in the text."
     , ""
     , "Rules that decide whether a claim is kept:"
     , "  Quote only from the subject named below. Other files appear above; their lines are not evidence here."
+    , "  The quote must CONTAIN what the statement is about. A line that announces something, ending in a colon, is not evidence for the lines after it."
     , "  Never join two lines into one quote. Pick a single line."
     , "  Never quote a line containing ''${ or a backslash escape. Choose a different line."
     , "  Never abbreviate a quote with an ellipsis."
-    , "  A claim of kind reason must be the reason THE TEXT GIVES, quoted from a comment, with confidence stated. If the file gives no reason, return no reason claim."
+    , "  A claim of kind reason must quote a COMMENT giving that reason. If no comment gives it, return no reason claim: a rationale you worked out yourself is not the file's reasoning."
     , "  Do not use a word unless it appears in the text. Names of systems, tools or concepts you know from elsewhere are rejected."
     , ""
     , "Prefer few precise claims to many vague ones. Prefer the least obvious thing in the file to the most obvious. Do not repeat a claim."

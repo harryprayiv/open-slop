@@ -7,33 +7,35 @@
 --
 -- A claim names a subject drawn from a list the caller supplies, quotes the
 -- source verbatim as its evidence, and adds one sentence. Everything else
--- about it is closed: the kind and the confidence are enums, so the
--- grammar the server decodes under cannot produce anything else, and the
--- subject is an enum too, so a file or a symbol that does not exist is not
--- a reachable token.
+-- is closed: the kind is an enum and the subject is an enum, so under the
+-- grammar the server decodes with, a file or a category that does not exist
+-- is not a reachable token.
 --
 -- Evidence is quoted text rather than byte offsets. A model cannot count
--- bytes, and asking it to invites a plausible number that points at the
--- wrong line. A quote either occurs in the source or it does not, which is
--- a substring search, and the offsets are then recovered here.
+-- bytes, and asking it to invites a plausible number pointing at the wrong
+-- line. A quote either occurs in the source or it does not, which is a
+-- substring search, and the offsets are recovered here.
 --
 -- ============================================================================
 -- WHAT EACH CHECK CATCHES
 -- ============================================================================
 --
---   subjectKnown     a claim about something that is not in this part
---   evidenceResolves a quote that is not in the source, which is the
---                    signature of an invented fact
---   identifiersKnown a statement naming a function, option or unit that
---                    appears nowhere in the source: the most common and
---                    most damaging failure mode, caught by a substring test
---   reasonIsStated   a rationale the model supplied rather than found
---   notDuplicate     the same claim twice, which small models do under a
---                    schema that asks for a list
+--   subjectKnown      a claim about something not in this part
+--   evidenceResolves  a quote that is not in the source: an invented fact
+--   evidenceIsApt     a quote sharing no name with its statement, which is
+--                     how a colon-ended lead-in gets cited for the lines
+--                     below it
+--   identifiersKnown  a statement naming something that appears nowhere in
+--                     the source: the most damaging failure, a set lookup
+--   reasonIsStated    a rationale the model supplied rather than found
+--   notDuplicate      the same claim twice, which small models do under a
+--                     schema asking for a list
 --
 -- Nothing here judges whether a claim is TRUE. These checks remove claims
--- that cannot be true. What survives is for a person, or for a second
--- model, to read.
+-- that cannot be true, and one measured failure shows the limit: a claim
+-- quoting a fail-message helper, "homebeacon-keycheck: $1", and reading $1
+-- as the script's first argument. Real quote, wrong reading, every check
+-- passed. That is the job of an entailment model, not of a substring test.
 module OpenSlop.Claim
   ( ClaimKind (..)
   , Confidence (..)
@@ -50,7 +52,7 @@ module OpenSlop.Claim
   ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withText, (.=))
-import Data.Char (isAlpha, isAlphaNum, isSpace, isUpper)
+import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace, isUpper)
 import Data.List (sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -89,14 +91,14 @@ instance FromJSON ClaimKind where
       (k : _) -> pure k
       [] -> fail ("unknown claim kind " <> T.unpack t)
 
-data Confidence = Stated | Inferred | Unclear
+-- | DERIVED, never asked for. See the note on the schema below.
+data Confidence = Stated | Inferred
   deriving stock (Show, Eq, Ord, Enum, Bounded)
 
 confidenceText :: Confidence -> Text
 confidenceText = \case
   Stated -> "stated"
   Inferred -> "inferred"
-  Unclear -> "unclear"
 
 instance ToJSON Confidence where
   toJSON = toJSON . confidenceText
@@ -108,13 +110,13 @@ instance FromJSON Confidence where
       [] -> fail ("unknown confidence " <> T.unpack t)
 
 -- | Exactly what the model returns. Every field is either closed or
--- checkable.
+-- checkable, and there is no field whose value is the model's opinion of
+-- its own work.
 data RawClaim = RawClaim
   { subject :: Text
   , kind :: ClaimKind
   , quotes :: [Text]
   , statement :: Text
-  , confidence :: Confidence
   }
   deriving stock (Show, Eq, Generic)
   deriving anyclass (ToJSON, FromJSON)
@@ -126,6 +128,9 @@ data Evidence = Evidence
   { quote :: Text
   , start :: Int
   , end :: Int
+  , inComment :: Bool
+  -- ^ the quote came from a comment, which is what makes a claim stated
+  -- rather than inferred
   }
   deriving stock (Show, Eq, Generic)
   deriving anyclass (ToJSON, FromJSON)
@@ -158,10 +163,16 @@ data Verdict = Verdict
 
 -- | The JSON Schema for a list of claims about one subject list.
 --
--- minItems and maxItems on the array are what make coverage a property of
--- the grammar rather than a warning afterwards: measured 2026-09-26, the
--- same model that documented one file of two without them documented both
--- with them. The caller passes the bounds it wants.
+-- minItems and maxItems make coverage a property of the grammar rather
+-- than a warning afterwards: measured 2026-09-26, the same model that
+-- documented one file of two without them documented both with them.
+--
+-- There is no confidence field. It used to be the model's to choose, and
+-- requiring kind=reason to carry confidence=stated taught the model to
+-- avoid both labels: every claim in that run came back inferred, several
+-- quoting comments that state the fact outright, and not one was labelled
+-- a reason. A constraint a model can evade by relabelling is a tax on the
+-- honest path. Confidence is derived from where the quote landed.
 claimSchema :: [Text] -> (Int, Int) -> Value
 claimSchema subjects (lo, hi) =
   object
@@ -187,16 +198,13 @@ claimSchema subjects (lo, hi) =
                                   , "maxItems" .= (2 :: Int)
                                   , -- minLength, so a quote too short to identify
                                     -- anything is not a reachable token under the
-                                    -- grammar. One run on 2026-09-26 produced a
-                                    -- claim with an empty quote, which the checker
-                                    -- then had to reject after the tokens were
-                                    -- already paid for.
+                                    -- grammar rather than something the checker
+                                    -- removes after the tokens are paid for.
                                     "items" .= object ["type" .= ("string" :: Text), "minLength" .= (12 :: Int)]
                                   ]
                             , "statement" .= object ["type" .= ("string" :: Text)]
-                            , "confidence" .= object ["type" .= ("string" :: Text), "enum" .= map confidenceText [minBound .. maxBound]]
                             ]
-                      , "required" .= (["subject", "kind", "quotes", "statement", "confidence"] :: [Text])
+                      , "required" .= (["subject", "kind", "quotes", "statement"] :: [Text])
                       , "additionalProperties" .= False
                       ]
                 ]
@@ -208,54 +216,69 @@ claimSchema subjects (lo, hi) =
 -- ---------------------------------------------------------------------------
 -- The checks
 
--- | Tokens in a sentence that look like code rather than English, so that
--- a statement can be checked against the source without every ordinary
--- word being flagged.
+-- | Tokens that look like code rather than English, so a statement can be
+-- checked against the source without every ordinary word being flagged.
 --
--- A token counts when it carries a separator (a dot, slash, dash,
--- underscore, colon or at-sign), has an inner capital (camelCase), or is
--- shouted (all capitals). An English word in lower case never does, which
--- is what makes the check usable on prose. Trailing punctuation is
--- stripped, since a model writes "foo.bar." at the end of a sentence.
+-- A token counts when it carries a separator (dot, slash, dash,
+-- underscore, colon, at-sign), has an inner capital, is all capitals, or
+-- mixes letters with digits. An English word in lower case never does.
+-- Trailing punctuation is stripped, since a model writes "foo.bar." at the
+-- end of a sentence.
 identifiersIn :: Text -> Set Text
 identifiersIn t =
   Set.fromList
     [ w
     | raw <- T.split (\c -> c == ' ' || c == '\n' || c == '\t' || c == ',' || c == '(' || c == ')' || c == '"' || c == '`' || c == '\'') t
     , let w = T.dropAround (`elem` (".,;:!?" :: String)) raw
-    , T.length w > 2
+    , T.length w >= 2
     , codeLike w
     ]
   where
+    codeLike w
+      -- Two characters is enough when one is a digit and one a letter (v2,
+      -- x1), and never otherwise, so "is", "of" and "it" stay out.
+      | T.length w == 2 = T.any isDigit w && T.any isAlpha w
     codeLike w =
       T.any (`elem` ("._-/:@" :: String)) (T.drop 1 (T.init w))
         || T.any isUpper (T.drop 1 w)
         || (T.all (\c -> isUpper c || not (isAlpha c)) w && T.any isAlpha w)
+        -- A letter next to a digit: v2, sha256, ed25519. Without this the
+        -- aptness check below had nothing to work with on a statement whose
+        -- only specific word was "v2", and passed a claim citing the line
+        -- that announces a message format instead of the format itself.
+        || (T.any isDigit w && T.any isAlpha w)
 
 -- | Runs of whitespace collapsed to one space, so a quote copied across a
--- line break or with the indentation dropped still matches. The offsets a
--- claim carries are into this normalised form.
+-- line break or with the indentation dropped still matches.
 normalise :: Text -> Text
 normalise = T.unwords . T.words
+
+-- | Whether a line is a comment, by the markers the languages here use.
+-- Nix and shell use #, Haskell and PureScript use --, and a Nix module's
+-- option descriptions are prose in quotes, which count as code: a claim
+-- resting on one is a reading of the file rather than a statement it makes
+-- about itself.
+isCommentLine :: Text -> Bool
+isCommentLine l =
+  let t = T.stripStart l
+   in T.isPrefixOf "#" t || T.isPrefixOf "--" t || T.isPrefixOf "*" t
 
 -- | Run every check over every claim, against the subjects the caller
 -- supplied. Checks run cheapest first and the first failure decides.
 verify :: [Subject] -> [RawClaim] -> Verdict
 verify subjects raws = go Set.empty raws (Verdict [] [])
   where
-    table = Map.fromList [(s.name, normalise s.source) | s <- subjects]
+    table = Map.fromList [(s.name, s.source) | s <- subjects]
 
     -- The haystack every identifier in a statement is looked for in: the
     -- whole part, lower-cased, plus the subject names.
     --
     -- Substring rather than token membership, and case-insensitive, after
-    -- 2026-09-26: tokenising the source rejected "OpenSSL" because the
-    -- source says "openssl", and rejected "homebeacon-key.pem" because the
-    -- source says "$out/homebeacon-key.pem" and the tokeniser kept the
-    -- prefix. Both claims were true. The looser test still catches the
-    -- failure that matters, a name that is nowhere in the text at all: the
-    -- same run caught "NixOS" and "non-zero", neither of which occurs in
-    -- the bundle, in statements whose quotes were real.
+    -- 2026-09-26: tokenising the source rejected "OpenSSL" against a source
+    -- saying "openssl", and "homebeacon-key.pem" against
+    -- "$out/homebeacon-key.pem". Both claims were true. The looser test
+    -- still catches what matters: the same run caught "NixOS" and
+    -- "non-zero", neither of which occurs in the bundle.
     haystack = T.toLower (T.intercalate "\n" (map (.source) subjects <> map (.name) subjects))
 
     isKnown w = T.isInfixOf (T.toLower w) haystack
@@ -270,57 +293,88 @@ verify subjects raws = go Set.empty raws (Verdict [] [])
     check seen r
       | Set.member (fingerprint r) seen = Left "duplicate of an earlier claim"
       | T.null (T.strip r.statement) = Left "empty statement"
-      -- A reason is the text's reason, never the model's. Both claims a
-      -- human rejected on 2026-09-26 were inferred rationales presented as
-      -- the file's own: one took genkey.nix's impersonation argument and
-      -- attached it to keycheck in default.nix. If a reason cannot be
-      -- quoted from a comment, the honest output is no claim.
-      | r.kind == Reason && r.confidence /= Stated =
-          Left "a reason must be stated in the text and quoted, not inferred"
       | otherwise = case Map.lookup r.subject table of
           Nothing -> Left ("subject " <> r.subject <> " is not one of the subjects for this part")
           Just src -> do
             ev <- locate src r.quotes
             let unknown = filter (not . isKnown) (Set.toList (identifiersIn r.statement))
+                conf = if any (.inComment) ev then Stated else Inferred
             if not (null unknown)
               then Left ("the statement names " <> T.intercalate ", " (take 4 unknown) <> ", which appears nowhere in this part")
-              else
-                Right
-                  Claim
-                    { subject = r.subject
-                    , kind = r.kind
-                    , evidence = ev
-                    , statement = T.strip r.statement
-                    , confidence = r.confidence
-                    , passed = ["subjectKnown", "evidenceResolves", "identifiersKnown", "reasonIsStated", "notDuplicate"]
-                    }
+              else do
+                aptness ev r
+                -- A reason is the text's reason, never the model's, and
+                -- now it cannot be relabelled into existence: a reason is
+                -- accepted only when its evidence came from a comment.
+                if r.kind == Reason && conf /= Stated
+                  then Left "a reason must be quoted from a comment, not read off the code"
+                  else
+                    Right
+                      Claim
+                        { subject = r.subject
+                        , kind = r.kind
+                        , evidence = ev
+                        , statement = T.strip r.statement
+                        , confidence = conf
+                        , passed = ["subjectKnown", "evidenceResolves", "evidenceIsApt", "identifiersKnown", "reasonIsStated", "notDuplicate"]
+                        }
+
+    -- A quote must share at least one code-shaped name with its statement,
+    -- when the statement has any. Measured 2026-09-26: a claim about the
+    -- fields of a signed message cited "The signed message is exactly:",
+    -- the colon-ended line ANNOUNCING the format rather than the format.
+    -- True statement, evidence that shows nothing.
+    aptness ev r =
+      let inStatement = identifiersIn r.statement
+          -- Substring, not token equality, for the same reason the
+          -- identifier check uses it: the quote holds
+          -- "$out/homebeacon-pub.pem" where the statement says
+          -- "homebeacon-pub.pem", and tokenising rejected a true claim.
+          quoted = T.toLower (T.intercalate "\n" (map (.quote) ev))
+          shared = any (\w -> T.isInfixOf (T.toLower w) quoted) (Set.toList inStatement)
+       in if Set.null inStatement || shared
+            then Right ()
+            else
+              Left
+                ( "the quote shares no name with the statement, so it does not show what the claim says ("
+                    <> T.intercalate ", " (take 3 (Set.toList inStatement))
+                    <> " appear in the statement, none in the quote)"
+                )
 
     locate _ [] = Left "no evidence quoted"
     locate src qs = traverse (one src) qs
 
     -- A quote matches when its normalised form occurs in the normalised
-    -- source. Two concessions, both measured on 2026-09-26 against real
-    -- rejections, neither of which weakens the guarantee that the words
-    -- came from the text:
+    -- source. Two concessions, both measured against real rejections,
+    -- neither weakening the guarantee that the words came from the text:
+    -- whitespace is normalised, because a model reflows a quote that
+    -- crossed a line break; and a quote ending in an ellipsis is matched by
+    -- its prefix, because models abbreviate whatever the instruction says,
+    -- with at least twenty characters left so "a..." matches nothing.
     --
-    --   * whitespace is normalised, because a model reflows a quote that
-    --     crossed a line break;
-    --   * a quote ending in an ellipsis is matched by its prefix, because
-    --     models abbreviate long quotes whatever the instruction says. At
-    --     least twenty characters must remain, so "a..." matches nothing.
-    --
-    -- What is still rejected, from that run: a quote whose words are not in
-    -- the source in that order (an invented second openssl call), a quote
-    -- missing the closing brace of a Nix escape, and a quote that belongs
-    -- to a different file in the same bundle.
+    -- Still rejected, from that run: an invented second openssl call, a
+    -- quote missing the closing brace of a Nix escape, and a quote taken
+    -- from a different file in the same bundle.
     one src q =
-      let q0 = normalise (T.strip q)
+      let src' = normalise src
+          q0 = normalise (T.strip q)
           trimmed = T.dropWhileEnd (\c -> c == '.' || c == '\8230' || isSpace c) q0
-          candidates =
-            [q0]
-              <> [trimmed | trimmed /= q0, T.length trimmed >= 20]
-       in case [(c, before) | c <- candidates, not (T.null c), let (before, after) = T.breakOn c src, not (T.null after)] of
-            ((c, before) : _) -> Right Evidence {quote = c, start = T.length before, end = T.length before + T.length c}
+          candidates = [q0] <> [trimmed | trimmed /= q0, T.length trimmed >= 20]
+          -- Which line the quote came from, for the comment test. The
+          -- normalised offsets cannot index the original, so the line is
+          -- found by searching the original lines for the quote's first
+          -- twenty characters.
+          probe c = T.take 20 c
+          fromComment c = any (\l -> T.isInfixOf (probe c) (normalise l) && isCommentLine l) (T.lines src)
+       in case [(c, before) | c <- candidates, not (T.null c), let (before, after) = T.breakOn c src', not (T.null after)] of
+            ((c, before) : _) ->
+              Right
+                Evidence
+                  { quote = c
+                  , start = T.length before
+                  , end = T.length before + T.length c
+                  , inComment = fromComment c
+                  }
             [] ->
               if T.null q0
                 then Left "an empty quote"
@@ -354,7 +408,6 @@ renderClaims subjects cs = T.intercalate "\n" (map one subjects)
     marker = \case
       Stated -> ""
       Inferred -> " [inferred]"
-      Unclear -> " [unclear]"
     heading = \case
       Purpose -> "Purpose"
       Interface -> "Interface"
