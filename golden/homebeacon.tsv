@@ -1,0 +1,29 @@
+# Golden set for modules/system/homebeacon, first pass 2026-09-26.
+#
+# Judged against the source, not against how well the sentence reads. A
+# claim is y when a reviewer would take it into a pull request unchanged.
+#
+# Baseline this scores: llmq-claims against qwen2.5-coder 7B on
+# llama-server, min 3, max 4 claims per subject, 700-token cap, one request
+# per subject over a shared prefix held in the server's cache. 16 claims
+# produced, 8 survived the machine checks, 6 accepted here, 36 minutes,
+# 0.73 tok/s. End-to-end yield 6 of 16, about six minutes per shipped
+# claim.
+#
+# The two rejections share one cause: the model supplied a rationale the
+# text does not give. Line 1 smooths over a firewall rule it did not
+# understand ("binds to a broad address for exposure control"); line 3
+# takes the impersonation argument from genkey.nix's comment about
+# regeneration and attaches it to keycheck in default.nix. Both read well,
+# which is what makes them dangerous. Everything accepted below can be
+# traced to a line in the file it is about.
+#
+# verdict	subject	kind	statement
+n	modules/system/homebeacon/default.nix	purpose	The module configures a service to respond to presence challenges on a LAN-facing port and binds to a broad address for exposure control.
+y	modules/system/homebeacon/default.nix	interface	The module includes a service to validate the signing key at boot, ensuring it matches the committed public key.
+n	modules/system/homebeacon/default.nix	reason	The keycheck service is necessary to ensure the signing key is valid and matches the committed public key, preventing potential impersonation attacks.
+y	modules/system/homebeacon/genkey.nix	purpose	The script is intended to be run only on the workstation and not on the target system where it will be deployed.
+y	modules/system/homebeacon/keycheck.nix	interface	The script expects environment variables HOMEBEACON_KEY and HOMEBEACON_PIN to be set, which should point to the paths of the private and public key files respectively.
+y	modules/system/homebeacon/responder.nix	purpose	The responder implements protocol version 2 as specified in tests/homebeacon.nix.
+y	modules/system/homebeacon/responder.nix	behaviour	The responder signs a message containing the protocol version, nonce, and peer address.
+y	modules/system/homebeacon/responder.nix	behaviour	The responder binds the peer address into the signature to prevent relay attacks.
