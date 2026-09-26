@@ -20,8 +20,10 @@
 --                 start, so no context is sent.
 --   hailo-ollama  /api/generate with the messages joined, because the NPU
 --                 server takes one prompt. A response_format is refused:
---                 nothing constrains its output, and a schema field was
---                 reported to produce a 500 from it.
+--                 measured 2026-09-26, that server answers a request
+--                 carrying a format field with HTTP 500 and "No suitable
+--                 mapper found to deserialize the request body", and it has
+--                 no OpenAI route at all (404 on /v1/models).
 --
 -- ============================================================================
 -- THE WINDOW IS CHECKED BEFORE AND AFTER
@@ -119,6 +121,12 @@ plan t r = do
                 ( [ "messages" .= r.messages
                   , "stream" .= False
                   , "max_tokens" .= predict
+                  , -- Measured 2026-09-26 on oracle: a 4,700-token prompt
+                    -- prefills in 1.0 s warm against about 219 s cold, so a
+                    -- client that sends the same bundle in front of many
+                    -- small questions pays for it once. llama-server keeps
+                    -- the cache per slot; ollama ignores this field.
+                    "cache_prompt" .= True
                   ]
                     <> catMaybes
                       [ ("temperature" .=) <$> temperature
@@ -151,7 +159,7 @@ plan t r = do
     unsupportedFormat target =
       invalidRequest
         (Just "response_format_unsupported")
-        (target.name <> " is served by hailo-ollama, which cannot constrain output to a schema; use a cpu or llamacpp model")
+        (target.name <> " is served by hailo-ollama, which cannot constrain output to a schema and answers 500 to a request carrying one; use a cpu or llamacpp model")
 
 -- | A backend's answer, in the terms the OpenAI response and llmq's verdict
 -- need.

@@ -5,7 +5,11 @@
 #
 #   nix/modules/server.nix           the cpu backend's port and context length
 #   nix/modules/hailo.nix            the hailo backend's port
-#   nix/modules/llama-server.nix     the llamacpp backend's port and context
+#   nix/modules/llama-server.nix     the llamacpp backend's port AND its
+#                                    --ctx-size, which is why the context for
+#                                    that server is changed here rather than
+#                                    on a host
+#   nix/modules/gateway.nix          the loopback catalogue it serves
 #   nix/modules/catalogue-check.nix  warns when a row declares a model this
 #                                    file does not describe
 #   nix/modules/client.nix           writes it as JSON for llmq, with the
@@ -81,10 +85,15 @@
         is where the instruction sits, and the server still answers 200. llmq
         fails any part whose prompt_eval_count reaches ctx.
 
-        Prefill is slow here and grows with the prompt. A full-size part can sit
-        for many minutes before its first output token. llmq does not treat
-        that silence as a failure; curl's TCP keepalive detects a server that
-        has gone away.
+        Reuses the KV cache of a shared prefix, measured 2026-09-26: a
+        4,700-token prompt took about 219 s cold, 5.6 s with a different
+        tail, and 0.95 s repeated, with an earlier prefix still hitting on
+        return. It has no cache_prompt field to control that and ignores the
+        one llama-server takes.
+
+        Its prompt_eval_duration field is not usable: the same measurement
+        reported 711 s of prefill inside a 258 s wall clock. Time requests
+        from outside.
       '';
     };
 
@@ -125,14 +134,21 @@
         request. Upstream weight licences vary per model; the HEFs themselves
         ship in Hailo's proprietary zoo.
 
-        Streams like ollama and honours num_predict. Reports no prompt token
-        count, so an overflowing prompt cannot be detected: measured, a
-        prompt past the 2048-token window comes back as garbage with HTTP
-        200. The byte budget is the only guard, and it is set at half the
-        window for that reason.
+        NO SCHEMA, NO OPENAI ROUTE. Measured 2026-09-26: a request carrying a
+        format field is answered with HTTP 500 and "No suitable mapper found
+        to deserialize the request body", and GET /v1/models is a 404 from
+        oatpp. The gateway refuses a response_format for this backend rather
+        than sending a field it cannot honour, and no typed stage can run
+        here.
 
-        Under 3 KB of input per request. Long text becomes hundreds of small
-        parts, each written with no view of the others.
+        Reports no prompt token count, so an overflowing prompt cannot be
+        detected: measured, a prompt past the 2048-token window comes back as
+        garbage with HTTP 200. The byte budget is the only guard, and it is
+        set at half the window for that reason.
+
+        Under 3 KB of input per request. Suitable for a closed choice with a
+        whitelist check in Haskell, under the rule that it may only add work,
+        never remove it.
       '';
     };
 
@@ -147,36 +163,60 @@
       streams = true;
       acceptsOptions = true;
 
-      # MEASURED 2026-09-20 on the 8B: prefill 4.6 tok/s at 128 tokens and
-      # 2.85 at 8K; decode 3.6 at short context and 0.47 at 8K. Context
-      # length sets the rate on this CPU, not model size. 32K is held for
-      # memory's sake; nothing here should be sent 32K of prompt, because
-      # the prefill alone would be hours. predict is kept at 4096 for the
-      # short-prompt work this backend is actually good at.
-      ctx = 32768;
-      predict = 4096;
+      # 16384 since 2026-09-26, down from 32768. The KV cache is the cost,
+      # the bundles this serves are about 5K tokens, and a window the Pi
+      # cannot prefill in reasonable time buys nothing. The claims pipeline
+      # sends one bundle in front of many per-subject questions, so what
+      # matters here is warm prefill rather than window size.
+      ctx = 16384;
+      predict = 2048;
       promptOverhead = 512;
       charsPerToken = 2.8;
       temperature = 0.0;
 
       blurb = ''
-        llama-server from PrismML's llama.cpp fork, serving one ternary
-        Bonsai GGUF from the store. Reports its own truncation, streams, and
-        takes n_predict and temperature per request. Context is fixed at
-        start. llmq renders the chat template through /apply-template first;
-        /completion alone is raw completion and an instruct model given
-        untemplated input continues it instead of answering.
+        llama-server from PrismML's llama.cpp fork. Reports its own
+        truncation, streams, takes n_predict, temperature and seed per
+        request, and constrains decoding to a JSON Schema through
+        response_format. Context is fixed at start.
 
-        Runs on demand, not at boot. Measured 2026-09-20 on a Pi 5: the 8B
-        decodes at 3.6 tok/s on a short prompt and 0.47 tok/s at 8K of
-        context, with prefill at 2.85 tok/s there. Fast for `llmq ask`;
-        slower than qwen2.5-coder:7b for documentation-length parts.
+        THE BACKEND FOR TYPED WORK, since 2026-09-26. Measured that day on
+        oracle against the same 4,700-token prompt: decode 0.975 tok/s
+        against ollama's 1.03, and warm prefill 1.0 s against ollama's 5.6,
+        because cache_prompt works and is sent by the gateway and by
+        llmq-claims. A pipeline that asks many questions over one bundle
+        pays that difference on every call.
+
+        Speculative decoding does not work in this fork as built, measured
+        the same day: --spec-draft-model loads the draft, and the server
+        then reports no draft statistics and no speedup, with or without a
+        grammar. Worth retrying against upstream llama.cpp.
       '';
     };
   };
 
   models = {
     llamacpp = {
+      "qwen2.5-coder-7b" = {
+        summary = "code-tuned 7B, the typed-pipeline model, 0.98 tok/s";
+        docFit = "best";
+        tokPerSec = 0.98;
+        licence = "Apache-2.0";
+        blurb = ''
+          Qwen2.5-Coder 7B Instruct, Q4_K_M, about 4.7 GB, served by
+          llama-server as a store-pinned GGUF rather than through ollama's
+          private blob store.
+
+          Measured 2026-09-26 under a JSON Schema on a 4,700-token prompt:
+          0.975 tok/s decode, 1.0 s warm prefill, 235 output tokens in 240
+          seconds. Constrained decoding costs nothing against free text.
+
+          With minItems on an array in the schema, it returns one record per
+          subject and cannot stop early. Without it, on the same input, it
+          returned one record where two were asked for.
+        '';
+      };
+
       "bonsai-2-27b" = {
         summary = "Ternary Bonsai 2 27B, PQ2_0, 0.66 tok/s";
         docFit = "unsuitable";
@@ -204,36 +244,38 @@
           Measured 2026-09-20: prefill 4.62 tok/s and decode 3.60 tok/s at
           128 tokens (llama-bench); prefill 2.85 and decode 0.47 on a real
           8,381-token part. The fastest CPU model on the fleet for a short
-          question and slower than qwen2.5-coder:7b (5.7 / 0.7 at the same
-          part) for documentation. tokPerSec above is the short-prompt
-          figure; llmq's dry-run estimate overstates a long job by a factor
-          of seven for this model.
+          question and slower than qwen2.5-coder at documentation length.
+          tokPerSec above is the short-prompt figure; llmq's dry-run
+          estimate overstates a long job by a factor of seven for this
+          model.
         '';
       };
     };
 
     cpu = {
       "qwen2.5-coder:7b" = {
-        summary = "code-tuned 7B, the documentation model, 0.7 tok/s at 8K";
+        summary = "code-tuned 7B on ollama, 0.7 tok/s at 8K";
         docFit = "best";
         # 2026-09-20, a real 8,381-token part: prefill 5.7, decode 0.7. On a
-        # 19-token answer the day before it decoded at 2.0.
+        # 19-token answer the day before it decoded at 2.0. Those prefill
+        # figures came from ollama's own duration fields, which the
+        # 2026-09-26 measurement showed to be unreliable; the decode rates
+        # were taken from wall clock and stand.
         tokPerSec = 0.7;
         licence = "Apache-2.0";
         blurb = ''
           Qwen2.5-Coder 7B Instruct, Q4_K_M, about 4.7 GB resident.
           Trained context 32K. llmq asks for 16K, about 0.9 GiB of KV cache.
 
+          The same weights the llamacpp backend serves as a pinned GGUF.
+          Typed work goes there instead, because only llama-server has
+          cache_prompt and a grammar together.
+
           Reads code more carefully than anything else on the fleet. Its
           training is dominated by mainstream languages, so expect confident
           mistakes about type-level Haskell, PureScript rows and effects, and
-          Nix module merge semantics. Check every claim it makes about a type.
-
-          Measured 2026-09-20 on a 31 KB part: 25 minutes of prefill at 5.7
-          tok/s, then 0.7 tok/s of output. A full 38 KB part is about an
-          hour and a half. Given four files in one part it documented one
-          and stopped; llmq warns when a part's output has no heading for a
-          file that begins in it.
+          Nix module merge semantics. Check every claim it makes about a
+          type.
         '';
       };
 
@@ -250,8 +292,9 @@
           than qwen2.5-coder. A 128K request is legal and fits in RAM; at this
           CPU's prefill rate it is an overnight job for a single part.
 
-          1.7 tok/s was measured on a short answer. Expect the qwen2.5-coder
-          figure, 0.7, at a full part's context.
+          The second family on the fleet, which makes it the cross-check
+          model: a claim two unrelated families derive from the same evidence
+          is as good as this class of system gets.
         '';
       };
 
@@ -263,8 +306,8 @@
         licence = "Apache-2.0, from Qwen2.5-7B-Instruct";
         blurb = ''
           Qwen2.5-7B-Instruct with its refusal direction removed, Q3_K_M,
-          about 3.8 GB. Pinned by hash through services.open-slop.server.pinnedModels, so the
-          bytes cannot drift.
+          about 3.8 GB. Pinned by hash through
+          services.open-slop.server.pinnedModels, so the bytes cannot drift.
 
           General instruct, not code-tuned. Abliteration and a 3-bit quant both
           cost accuracy, and reference documentation is where that shows first.
@@ -285,7 +328,9 @@
 
           Faster per token than either 7-8B on the CPU, with under half the
           parameters and an eighth of the window. Useful for a one-paragraph
-          summary of one small file. Not for reference documentation.
+          summary of one small file, or a closed choice. Not for reference
+          documentation, and not for anything typed: this backend cannot
+          constrain output.
         '';
       };
 
@@ -339,8 +384,10 @@
         blurb = ''
           DeepSeek-R1 distilled into Qwen 1.5B, as an int4 HEF. Emits a
           reasoning block before its answer, and that block comes out of the
-          same small window and the same slow token budget. llmq keeps the
-          block in the output rather than guessing where it ends.
+          same small window and the same slow token budget, which on a
+          2048-token window means the budget is gone before the answer
+          starts. llmq keeps the block in the output rather than guessing
+          where it ends.
 
           Renamed deepseek_r1:1.5b in the 5.3.0 zoo.
         '';

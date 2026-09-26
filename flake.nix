@@ -24,8 +24,8 @@
   # So the cabal file puts that executable behind the `grace` flag, off by
   # default:
   #
-  #   pkgs.open-slop.llmq        llmq and the gateway, no Grace, small
-  #   pkgs.open-slop.llmq-grace  the stage runner, with Grace, large
+  #   pkgs.open-slop.llmq        llmq, the gateway and llmq-claims: 86 MB
+  #   pkgs.open-slop.llmq-grace  the Grace stage runner: 4.6 GB
   #
   # The generated derivation is made with the flag ON (`cabal2nix --flag
   # grace`), so Grace is in the dependency list for both; the flag-off build
@@ -37,7 +37,7 @@
   # ==========================================================================
   #
   #   overlays.default            pkgs.open-slop.{llmq,llmq-grace,catalogue,
-  #                               llama-cpp-prismml,bonsai,grace}
+  #                               llama-cpp-prismml,bonsai,gguf,grace}
   #   nixosModules.default        every server-side module; inert until a
   #                               services.open-slop.* option enables something
   #   homeManagerModules.default  programs.llmq
@@ -100,9 +100,9 @@
           open-slop = {
             catalogue = import ./catalogue;
 
-            # What the fleet gets: llmq and the gateway, the `grace` flag at
-            # its default of off, so nothing here links Grace and
-            # justStaticExecutables' GHC check passes as it should.
+            # What the fleet gets: llmq, the gateway and llmq-claims, the
+            # `grace` flag at its default of off, so nothing here links Grace
+            # and justStaticExecutables' GHC check passes as it should.
             llmq = hlib.justStaticExecutables (hlib.dontHaddock hpkgs.open-slop);
 
             # The Grace stage runner. The GHC check is off because it cannot
@@ -119,7 +119,15 @@
               rev = llama-cpp-prismml.shortRev or "dirty";
               lastModifiedDate = llama-cpp-prismml.lastModifiedDate or "19700101000000";
             };
+
             bonsai = final.callPackage ./nix/packages/bonsai-weights.nix { };
+
+            # Ordinary community quants of ordinary open-weight models, for
+            # llama-server to serve. Separate from bonsai because those are
+            # one fork's ternary packs. Added 2026-09-26, when the typed
+            # pipeline moved to llama-server and needed the 7B as a declared
+            # artifact rather than as a root-owned blob inside ollama.
+            gguf = final.callPackage ./nix/packages/gguf-weights.nix { };
           };
         };
     in
@@ -172,7 +180,8 @@
           grace = pkgs.open-slop.grace;
           llama-cpp-prismml = pkgs.open-slop.llama-cpp-prismml;
         }
-        // nixpkgs.lib.mapAttrs' (n: v: nixpkgs.lib.nameValuePair "bonsai-${n}" v) pkgs.open-slop.bonsai;
+        // nixpkgs.lib.mapAttrs' (n: v: nixpkgs.lib.nameValuePair "bonsai-${n}" v) pkgs.open-slop.bonsai
+        // nixpkgs.lib.mapAttrs' (n: v: nixpkgs.lib.nameValuePair "gguf-${n}" v) pkgs.open-slop.gguf;
 
         apps = {
           default = {
@@ -183,6 +192,11 @@
           gateway = {
             type = "app";
             program = "${pkgs.open-slop.llmq}/bin/open-slop-gateway";
+          };
+
+          claims = {
+            type = "app";
+            program = "${pkgs.open-slop.llmq}/bin/llmq-claims";
           };
 
           grace = {
@@ -234,7 +248,7 @@
         };
 
         devShells.default = hpkgs.shellFor {
-          packages = _: [ (hpkgs.open-slop.override { }) ];
+          packages = _: [ hpkgs.open-slop ];
 
           nativeBuildInputs = with hpkgs; [
             cabal-install
