@@ -10,10 +10,10 @@
 --     a model cannot answer about one subject when asked about two;
 --   * constrained decoding costs nothing against free text (1.03 against
 --     1.005 tok/s), so there is no reason to generate prose;
---   * decode is the whole cost, 0.75 tok/s at 8K of context under a
+--   * decode is the whole cost, 0.73 tok/s at 8K of context under a
 --     grammar, so the design goal is fewer output tokens rather than fewer
---     input tokens. The token cap is also the wall clock: 450 tokens is
---     ten minutes.
+--     input tokens. The token cap is also the wall clock: 700 tokens is
+--     about sixteen minutes.
 --
 -- Hence: the bundle goes in front of every request unchanged, each request
 -- asks about one subject, and the answer is a short list of claims that
@@ -82,7 +82,7 @@ optsP =
     <*> strOption (long "out" <> short 'o' <> metavar "DIR" <> value "claims-out" <> showDefault)
     <*> option auto (long "min-claims" <> metavar "N" <> value 2 <> showDefault <> help "the schema's minItems: the model cannot return fewer")
     <*> option auto (long "max-claims" <> metavar "N" <> value 4 <> showDefault)
-    <*> option auto (long "max-tokens" <> metavar "N" <> value 900 <> showDefault <> help "output cap per subject; at 0.75 tok/s this is also the per-subject time, so 900 is about twenty minutes")
+    <*> option auto (long "max-tokens" <> metavar "N" <> value 700 <> showDefault <> help "output cap per subject; at 0.73 tok/s this is also the per-subject time, so 700 is about sixteen minutes")
     <*> optional (strOption (long "instruction" <> metavar "FILE"))
     <*> option auto (long "timeout" <> short 't' <> metavar "SECS" <> value 3600 <> showDefault)
     <*> optional (strOption (long "only" <> metavar "SUBSTR" <> help "run only subjects whose name contains this"))
@@ -225,9 +225,17 @@ splitSubjects t = go Nothing [] (T.lines t)
     close Nothing _ = []
     close (Just (f, body)) _ = [Subject {name = f, source = T.unlines (reverse body)}]
 
--- | Quotes are the expensive part of the budget, so the instruction caps
--- their length. Measured 2026-09-26: three claims with unbounded quotes
--- overran a 450-token cap before the array closed.
+-- | Every rule here was written against a measured rejection from the run
+-- of 2026-09-26, which produced sixteen claims of which six were the
+-- model's fault:
+--
+--   two quotes copied from a NEIGHBOURING file in the same bundle;
+--   one quote joining three lines into a single string;
+--   one quote dropping the closing brace of a Nix ''${ escape;
+--   two statements using words that are nowhere in the bundle;
+--   two reasons the model supplied rather than found in a comment.
+--
+-- Quotes are also the expensive part of the budget, so they are capped.
 defaultInstruction :: Text
 defaultInstruction =
   T.unlines
@@ -236,11 +244,19 @@ defaultInstruction =
     , "Each claim has:"
     , "  subject:    exactly the subject named below."
     , "  kind:       purpose, interface, behaviour, reason, or openIssue."
-    , "  quotes:     ONE fragment, at most fifteen words, copied CHARACTER FOR CHARACTER from that subject's text. A quote that is not in the text is rejected. Never abbreviate a quote with an ellipsis."
-    , "  statement:  ONE sentence, at most thirty words, stating what the quote shows. Use only names that appear in the text."
-    , "  confidence: stated when the text says it outright, inferred when you are reading between lines, unclear when you are unsure."
+    , "  quotes:     ONE fragment, at most fifteen words, copied CHARACTER FOR CHARACTER from that subject's own text. A quote that is not in that subject is rejected."
+    , "  statement:  ONE sentence, at most thirty words, stating what the quote shows. Use only words that appear in the text."
+    , "  confidence: stated when the text says it outright, inferred when you are reading between the lines, unclear when you are unsure."
     , ""
-    , "Prefer few precise claims to many vague ones. Do not describe the source in general terms. Do not repeat a claim. Do not mention anything that is not in the text."
+    , "Rules that decide whether a claim is kept:"
+    , "  Quote only from the subject named below. Other files appear above; their lines are not evidence here."
+    , "  Never join two lines into one quote. Pick a single line."
+    , "  Never quote a line containing ''${ or a backslash escape. Choose a different line."
+    , "  Never abbreviate a quote with an ellipsis."
+    , "  A claim of kind reason must be the reason THE TEXT GIVES, quoted from a comment, with confidence stated. If the file gives no reason, return no reason claim."
+    , "  Do not use a word unless it appears in the text. Names of systems, tools or concepts you know from elsewhere are rejected."
+    , ""
+    , "Prefer few precise claims to many vague ones. Prefer the least obvious thing in the file to the most obvious. Do not repeat a claim."
     ]
 
 slug :: Text -> Text

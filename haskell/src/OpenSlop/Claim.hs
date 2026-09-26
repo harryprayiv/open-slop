@@ -27,6 +27,7 @@
 --   identifiersKnown a statement naming a function, option or unit that
 --                    appears nowhere in the source: the most common and
 --                    most damaging failure mode, caught by a substring test
+--   reasonIsStated   a rationale the model supplied rather than found
 --   notDuplicate     the same claim twice, which small models do under a
 --                    schema that asks for a list
 --
@@ -184,7 +185,13 @@ claimSchema subjects (lo, hi) =
                                   [ "type" .= ("array" :: Text)
                                   , "minItems" .= (1 :: Int)
                                   , "maxItems" .= (2 :: Int)
-                                  , "items" .= object ["type" .= ("string" :: Text)]
+                                  , -- minLength, so a quote too short to identify
+                                    -- anything is not a reachable token under the
+                                    -- grammar. One run on 2026-09-26 produced a
+                                    -- claim with an empty quote, which the checker
+                                    -- then had to reject after the tokens were
+                                    -- already paid for.
+                                    "items" .= object ["type" .= ("string" :: Text), "minLength" .= (12 :: Int)]
                                   ]
                             , "statement" .= object ["type" .= ("string" :: Text)]
                             , "confidence" .= object ["type" .= ("string" :: Text), "enum" .= map confidenceText [minBound .. maxBound]]
@@ -246,7 +253,9 @@ verify subjects raws = go Set.empty raws (Verdict [] [])
     -- source says "openssl", and rejected "homebeacon-key.pem" because the
     -- source says "$out/homebeacon-key.pem" and the tokeniser kept the
     -- prefix. Both claims were true. The looser test still catches the
-    -- failure that matters, a name that is nowhere in the text at all.
+    -- failure that matters, a name that is nowhere in the text at all: the
+    -- same run caught "NixOS" and "non-zero", neither of which occurs in
+    -- the bundle, in statements whose quotes were real.
     haystack = T.toLower (T.intercalate "\n" (map (.source) subjects <> map (.name) subjects))
 
     isKnown w = T.isInfixOf (T.toLower w) haystack
@@ -261,6 +270,13 @@ verify subjects raws = go Set.empty raws (Verdict [] [])
     check seen r
       | Set.member (fingerprint r) seen = Left "duplicate of an earlier claim"
       | T.null (T.strip r.statement) = Left "empty statement"
+      -- A reason is the text's reason, never the model's. Both claims a
+      -- human rejected on 2026-09-26 were inferred rationales presented as
+      -- the file's own: one took genkey.nix's impersonation argument and
+      -- attached it to keycheck in default.nix. If a reason cannot be
+      -- quoted from a comment, the honest output is no claim.
+      | r.kind == Reason && r.confidence /= Stated =
+          Left "a reason must be stated in the text and quoted, not inferred"
       | otherwise = case Map.lookup r.subject table of
           Nothing -> Left ("subject " <> r.subject <> " is not one of the subjects for this part")
           Just src -> do
@@ -276,7 +292,7 @@ verify subjects raws = go Set.empty raws (Verdict [] [])
                     , evidence = ev
                     , statement = T.strip r.statement
                     , confidence = r.confidence
-                    , passed = ["subjectKnown", "evidenceResolves", "identifiersKnown", "notDuplicate"]
+                    , passed = ["subjectKnown", "evidenceResolves", "identifiersKnown", "reasonIsStated", "notDuplicate"]
                     }
 
     locate _ [] = Left "no evidence quoted"
@@ -293,8 +309,10 @@ verify subjects raws = go Set.empty raws (Verdict [] [])
     --     models abbreviate long quotes whatever the instruction says. At
     --     least twenty characters must remain, so "a..." matches nothing.
     --
-    -- What is still rejected: a quote whose words are not in the source in
-    -- that order, which is what a fabricated one looks like.
+    -- What is still rejected, from that run: a quote whose words are not in
+    -- the source in that order (an invented second openssl call), a quote
+    -- missing the closing brace of a Nix escape, and a quote that belongs
+    -- to a different file in the same bundle.
     one src q =
       let q0 = normalise (T.strip q)
           trimmed = T.dropWhileEnd (\c -> c == '.' || c == '\8230' || isSpace c) q0
