@@ -49,7 +49,7 @@ module OpenSlop.Claim
   ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withText, (.=))
-import Data.Char (isAlpha, isAlphaNum, isUpper)
+import Data.Char (isAlpha, isAlphaNum, isSpace, isUpper)
 import Data.List (sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -118,7 +118,9 @@ data RawClaim = RawClaim
   deriving stock (Show, Eq, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
--- | A quote, located.
+-- | A quote, located. The offsets are into the subject's source with
+-- whitespace normalised, so they are a pointer for a reader rather than a
+-- byte range for a machine.
 data Evidence = Evidence
   { quote :: Text
   , start :: Int
@@ -181,7 +183,7 @@ claimSchema subjects (lo, hi) =
                                 .= object
                                   [ "type" .= ("array" :: Text)
                                   , "minItems" .= (1 :: Int)
-                                  , "maxItems" .= (3 :: Int)
+                                  , "maxItems" .= (2 :: Int)
                                   , "items" .= object ["type" .= ("string" :: Text)]
                                   ]
                             , "statement" .= object ["type" .= ("string" :: Text)]
@@ -223,12 +225,18 @@ identifiersIn t =
         || T.any isUpper (T.drop 1 w)
         || (T.all (\c -> isUpper c || not (isAlpha c)) w && T.any isAlpha w)
 
+-- | Runs of whitespace collapsed to one space, so a quote copied across a
+-- line break or with the indentation dropped still matches. The offsets a
+-- claim carries are into this normalised form.
+normalise :: Text -> Text
+normalise = T.unwords . T.words
+
 -- | Run every check over every claim, against the subjects the caller
 -- supplied. Checks run cheapest first and the first failure decides.
 verify :: [Subject] -> [RawClaim] -> Verdict
 verify subjects raws = go Set.empty raws (Verdict [] [])
   where
-    table = Map.fromList [(s.name, s.source) | s <- subjects]
+    table = Map.fromList [(s.name, normalise s.source) | s <- subjects]
 
     -- The haystack every identifier in a statement is looked for in: the
     -- whole part, lower-cased, plus the subject names.
@@ -274,14 +282,31 @@ verify subjects raws = go Set.empty raws (Verdict [] [])
     locate _ [] = Left "no evidence quoted"
     locate src qs = traverse (one src) qs
 
+    -- A quote matches when its normalised form occurs in the normalised
+    -- source. Two concessions, both measured on 2026-09-26 against real
+    -- rejections, neither of which weakens the guarantee that the words
+    -- came from the text:
+    --
+    --   * whitespace is normalised, because a model reflows a quote that
+    --     crossed a line break;
+    --   * a quote ending in an ellipsis is matched by its prefix, because
+    --     models abbreviate long quotes whatever the instruction says. At
+    --     least twenty characters must remain, so "a..." matches nothing.
+    --
+    -- What is still rejected: a quote whose words are not in the source in
+    -- that order, which is what a fabricated one looks like.
     one src q =
-      let q' = T.strip q
-       in if T.null q'
-            then Left "an empty quote"
-            else case T.breakOn q' src of
-              (before, after)
-                | T.null after -> Left ("the quote " <> ellipsis q' <> " does not occur in the source")
-                | otherwise -> Right Evidence {quote = q', start = T.length before, end = T.length before + T.length q'}
+      let q0 = normalise (T.strip q)
+          trimmed = T.dropWhileEnd (\c -> c == '.' || c == '\8230' || isSpace c) q0
+          candidates =
+            [q0]
+              <> [trimmed | trimmed /= q0, T.length trimmed >= 20]
+       in case [(c, before) | c <- candidates, not (T.null c), let (before, after) = T.breakOn c src, not (T.null after)] of
+            ((c, before) : _) -> Right Evidence {quote = c, start = T.length before, end = T.length before + T.length c}
+            [] ->
+              if T.null q0
+                then Left "an empty quote"
+                else Left ("the quote " <> ellipsis q0 <> " does not occur in the source")
 
     ellipsis q = "\"" <> (if T.length q > 60 then T.take 57 q <> "..." else q) <> "\""
 
