@@ -49,12 +49,17 @@ let
     name = "llmq";
     paths = [ cfg.package ];
     nativeBuildInputs = [ pkgs.makeWrapper ];
+    # Every binary in the package is wrapped, not only llmq. llmq-bench and
+    # llmq-claims read the same catalogue and were started without it, so
+    # each run needed --catalogue and a store path found by hand.
     postBuild = ''
-      wrapProgram $out/bin/llmq \
-        --set-default OPEN_SLOP_CATALOGUE ${catalogueJson} \
-        --set-default OPEN_SLOP_PROMPTS ${../../prompts} \
-        --prefix PATH : ${lib.makeBinPath [ pkgs.fzf pkgs.xsel ]} \
-        ${lib.optionalString (cfg.keyFile != null) "--set-default LLMQ_KEY_FILE ${lib.escapeShellArg cfg.keyFile}"}
+      for bin in $out/bin/*; do
+        wrapProgram "$bin" \
+          --set-default OPEN_SLOP_CATALOGUE ${catalogueJson} \
+          --set-default OPEN_SLOP_PROMPTS ${../../prompts} \
+          --prefix PATH : ${lib.makeBinPath [ pkgs.fzf pkgs.xsel ]} \
+          ${lib.optionalString (cfg.keyFile != null) "--set-default LLMQ_KEY_FILE ${lib.escapeShellArg cfg.keyFile}"}
+      done
     '';
   };
 in
