@@ -54,7 +54,7 @@
     # reaches the gateway instead of api.openai.com. A path while it is
     # iterated on beside this repo; a forge URL once it is pushed.
     grace = {
-      url = "path:/home/bismuth/git/grace";
+      url = "github:harryprayiv/grace";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
