@@ -1,8 +1,9 @@
 { mkDerivation, aeson, base, base16-bytestring, bytestring
 , containers, cryptohash-sha256, directory, filelock, filepath
 , grace, http-client, http-client-tls, http-types, lib
-, optparse-applicative, tasty, tasty-hunit, tasty-quickcheck, text
-, time, typed-process, unix, wai, warp, warp-tls
+, optparse-applicative, scientific, tasty, tasty-hunit
+, tasty-quickcheck, text, time, typed-process, unix, wai, warp
+, warp-tls
 }:
 mkDerivation {
   pname = "open-slop";
@@ -17,7 +18,8 @@ mkDerivation {
   ];
   executableHaskellDepends = [
     aeson base bytestring containers directory filepath grace
-    optparse-applicative text time typed-process unix warp warp-tls
+    optparse-applicative scientific text time typed-process unix warp
+    warp-tls
   ];
   testHaskellDepends = [
     aeson base bytestring containers tasty tasty-hunit tasty-quickcheck
