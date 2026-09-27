@@ -13,8 +13,10 @@
 # NO CATALOGUE ENTRY and gives it the backend's default budget. Refusing to
 # deploy the inference box because a client-side description is missing would
 # couple the server to its documentation. So it warns until the entry exists,
-# which is a warning with one obvious fix: services.open-slop.catalogue.extra, or
-# an entry in catalogue/default.nix.
+# and the fix is to measure the model with llmq-bench and import the result
+# as services.open-slop.catalogue.extra in the consumer's configuration.
+# Which models a machine runs, and what is known about them, belong to the
+# consumer, not to open-slop.
 #
 # ============================================================================
 # WHY THE HAILO PORT IS PINNED BY A LITERAL
@@ -107,8 +109,12 @@ in
 
         They are served as normal. llmq lists them as NO CATALOGUE ENTRY, with
         the ${backend} backend's default budget and no description of what
-        they cost. Add an entry under models.${backend}, in
-        catalogue/default.nix or services.open-slop.catalogue.extra.
+        they cost. Measure them from a client that can reach this row:
+
+          llmq-bench --only ${backend} -o <consumer repo>/llm/catalogue.json
+
+        and import that file in this row's configuration as
+        services.open-slop.catalogue.extra = lib.importJSON ./path/to/catalogue.json;
       ''
     ) (lib.attrNames declared);
   };

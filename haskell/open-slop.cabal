@@ -9,9 +9,9 @@ build-type:         Simple
 
 -- llmq-grace links Grace, whose closure keeps a reference to the compiler,
 -- which puts 4.6 GB into any output containing it. The fleet's binaries
--- (llmq, open-slop-gateway, llmq-claims) must not carry that to a Pi, so
--- the executable that needs Grace is behind a flag: the package builds
--- without it by default, and the workstation build turns it on.
+-- (llmq, open-slop-gateway, llmq-claims, llmq-bench) must not carry that to
+-- a Pi, so the executable that needs Grace is behind a flag: the package
+-- builds without it by default, and the workstation build turns it on.
 flag grace
   description: Build llmq-grace, which links Grace and the compiler with it.
   default:     False
@@ -124,6 +124,21 @@ executable llmq-claims
     directory,
     filepath,
     optparse-applicative,
+    text,
+    time
+
+executable llmq-bench
+  import:          shared
+  hs-source-dirs:  app/llmq-bench
+  main-is:         Main.hs
+  ghc-options:     -threaded -rtsopts
+  build-depends:
+    open-slop,
+    aeson,
+    bytestring,
+    containers,
+    optparse-applicative,
+    scientific,
     text,
     time
 
