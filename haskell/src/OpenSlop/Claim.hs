@@ -17,11 +17,27 @@
 -- substring search, and the offsets are recovered here.
 --
 -- ============================================================================
+-- WHAT A LENGTH BOUND CAN AND CANNOT DO
+-- ============================================================================
+--
+-- Measured 2026-09-26, twice. At maxLength 220 the model was cut off in
+-- seven of twelve statements; at 300, six of twelve. It writes to whatever
+-- limit it is given, because the bound constrains the token stream and
+-- cannot reach back into how the sentence was planned. A bound is a
+-- backstop, not a style guide: what shortens a statement is an instruction
+-- asking for one specific thing, and a structure where a short answer is
+-- the natural one.
+--
+-- So the bound sits above where this model stops on its own, and the
+-- cut-off check below catches the runaway rather than the bound creating
+-- one.
+--
+-- ============================================================================
 -- WHAT EACH CHECK CATCHES
 -- ============================================================================
 --
 --   subjectKnown      a claim about something not in this part
---   statementComplete a sentence the grammar's length bound cut off
+--   statementComplete a sentence that stopped mid-thought
 --   evidenceResolves  a quote that is not in the source: an invented fact
 --   evidenceIsApt     a quote sharing no name with its statement, which is
 --                     how a colon-ended lead-in gets cited for the lines
@@ -166,18 +182,13 @@ data Verdict = Verdict
 --
 -- minItems and maxItems make coverage a property of the grammar rather
 -- than a warning afterwards: measured 2026-09-26, the same model that
--- documented one file of two without them documented both with them.
+-- documented one file of two without them documented both with them. A
+-- floor above one is a different matter and the caller should keep it low,
+-- because a subject with two things worth saying pads the third.
 --
--- maxLength on the statement, after a run in which the instruction said
--- "at most thirty words" and the model wrote sixty and kept going to the
--- token cap, four subjects in a row, producing no valid JSON at all. A
--- rule a model can ignore is not a constraint. The bound does not steer
--- the model, it cuts it off, which is why a truncated sentence is rejected
--- below.
---
--- The bounds cost nothing: measured warm, the same request with no bound,
--- a 60-character bound and a 220-character bound all took 25 seconds and
--- returned the same answer.
+-- The statement's maxLength is a backstop at 400, above where this model
+-- stops on its own. Tighter bounds were measured and they truncate rather
+-- than shape: 220 cut off seven statements of twelve, 300 cut off six.
 --
 -- There is no confidence field. It used to be the model's to choose, and
 -- requiring kind=reason to carry confidence=stated taught the model to
@@ -211,17 +222,14 @@ claimSchema subjects (lo, hi) =
                                     -- anything is not a reachable token under the
                                     -- grammar rather than something the checker
                                     -- removes after the tokens are paid for.
-                                    -- maxLength for the same reason in the other
-                                    -- direction: a quote is fifteen words, not a
-                                    -- transcription of the file.
                                     "items"
                                       .= object
                                         [ "type" .= ("string" :: Text)
                                         , "minLength" .= (12 :: Int)
-                                        , "maxLength" .= (120 :: Int)
+                                        , "maxLength" .= (160 :: Int)
                                         ]
                                   ]
-                            , "statement" .= object ["type" .= ("string" :: Text), "minLength" .= (20 :: Int), "maxLength" .= (220 :: Int)]
+                            , "statement" .= object ["type" .= ("string" :: Text), "minLength" .= (20 :: Int), "maxLength" .= (400 :: Int)]
                             ]
                       , "required" .= (["subject", "kind", "quotes", "statement"] :: [Text])
                       , "additionalProperties" .= False
@@ -267,10 +275,9 @@ identifiersIn t =
         -- that announces a message format instead of the format itself.
         || (T.any isDigit w && T.any isAlpha w)
 
--- | Whether a statement finished. Under a grammar with maxLength a model
--- that starts a long sentence is cut off rather than steered: measured
--- 2026-09-26, a claim came back ending in the word "maintaining". Half a
--- sentence reads like a claim until its last word.
+-- | Whether a statement finished. A sentence that stops mid-thought reads
+-- like a claim until its last word, and the model produces them whenever
+-- it starts a general statement it cannot finish in budget.
 endsSentence :: Text -> Bool
 endsSentence t = case T.unsnoc (T.stripEnd t) of
   Just (_, c) -> c `elem` ('.' : "!?")
@@ -322,7 +329,7 @@ verify subjects raws = go Set.empty raws (Verdict [] [])
       | Set.member (fingerprint r) seen = Left "duplicate of an earlier claim"
       | T.null (T.strip r.statement) = Left "empty statement"
       | not (endsSentence r.statement) =
-          Left "the statement was cut off before its end, so the schema's length bound is too tight for what it tried to say"
+          Left ("the statement stops mid-thought: " <> T.takeEnd 40 (T.strip r.statement))
       | otherwise = case Map.lookup r.subject table of
           Nothing -> Left ("subject " <> r.subject <> " is not one of the subjects for this part")
           Just src -> do
@@ -382,10 +389,10 @@ verify subjects raws = go Set.empty raws (Verdict [] [])
     -- its prefix, because models abbreviate whatever the instruction says,
     -- with at least twenty characters left so "a..." matches nothing.
     --
-    -- Still rejected, across four runs: an invented second openssl call
-    -- (three times, the most stable model failure here), a quote missing
-    -- the closing brace of a Nix escape, and a quote taken from a
-    -- different file in the same bundle.
+    -- Still rejected, across five runs: an invented second openssl call
+    -- (four times, the most stable model failure here), a quote missing the
+    -- closing brace of a Nix escape, a quote taken from a different file in
+    -- the same bundle, and "fail() { ... }" with the body elided.
     one src q =
       let src' = normalise src
           q0 = normalise (T.strip q)
