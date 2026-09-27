@@ -63,7 +63,7 @@ in
     name = "Ternary-Bonsai-2-27B-PTQ1_0.gguf";
     repo = "Ternary-Bonsai-2-27B-gguf";
     file = "Ternary-Bonsai-2-27B-PTQ1_0.gguf";
-    hash = "sha256-PI1wRwpdl+WiuUEN3Ymct0ARZZFGJibGDLL+rWRI9gs=";
+    hash = "sha256-UxB/UwqlLrAJEiY6se4pvRmSYch817StTKExjB/jPuM=";
     bytes = 5946648928;
     pack = "PTQ1_0";
   };
