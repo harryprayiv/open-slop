@@ -29,6 +29,26 @@
 # reach, and llmq on another machine reports it as no answer rather than
 # talking to it. Measured 2026-09-20: with the default, llmq's probe from
 # winsmuth timed out at eight seconds and the model was not listed.
+#
+# ============================================================================
+# SAMPLING IS DETERMINISTIC BY DEFAULT
+# ============================================================================
+#
+# llama-server's command-line sampling settings become the defaults for any
+# request that does not set its own. Grace sends neither a temperature nor
+# a seed, so without these flags every Grace call sampled at the server's
+# built-in temperature and two runs of the same prompt differed.
+#
+# That made every comparison between prompt versions meaningless: on
+# 2026-09-26 one chase annotation run produced five invariants for
+# Pelotero.DB.Pool and the next, with a changed template, produced two, and
+# there was no way to say whether the template or the dice caused the drop.
+#
+# The temperature comes from the catalogue's llamacpp backend, so the
+# catalogue remains the one place that states a backend's sampling. The
+# seed is fixed. A client that sends its own values, as llmq and the
+# gateway do, still overrides both; this only sets what a silent client
+# gets.
 {
   config,
   lib,
@@ -55,8 +75,8 @@ in
 
     model = lib.mkOption {
       type = types.package;
-      example = lib.literalExpression ''pkgs.open-slop.bonsai."2-27b-pq2_0"'';
-      description = "A GGUF file in the store. Use an entry of pkgs.open-slop.bonsai.";
+      example = lib.literalExpression ''pkgs.open-slop.gguf.qwen25-coder-7b'';
+      description = "A GGUF file in the store. Use an entry of pkgs.open-slop.gguf or pkgs.open-slop.bonsai.";
     };
 
     host = lib.mkOption {
@@ -70,7 +90,7 @@ in
 
     alias = lib.mkOption {
       type = types.str;
-      example = "bonsai-2-27b";
+      example = "qwen2.5-coder-7b";
       description = ''
         The name clients use in the model field, and the key the catalogue's
         models.llamacpp entry is looked up by. llama-server would otherwise
@@ -82,6 +102,28 @@ in
       type = types.ints.positive;
       default = 4;
       description = "CPU threads. A Pi 5 has four cores; more than that only adds contention.";
+    };
+
+    temperature = lib.mkOption {
+      type = types.nullOr types.float;
+      default = backend.temperature;
+      defaultText = lib.literalExpression "catalogue.backends.llamacpp.temperature";
+      description = ''
+        Default sampling temperature for requests that do not set one. The
+        catalogue's value by default, which is 0.0: deterministic. null
+        leaves llama-server's built-in default in force.
+      '';
+    };
+
+    seed = lib.mkOption {
+      type = types.nullOr types.int;
+      default = 1;
+      description = ''
+        Default seed for requests that do not set one. Fixed so that a
+        client which sends no sampling parameters, such as Grace, gets the
+        same answer to the same prompt. null leaves llama-server's random
+        default in force.
+      '';
     };
 
     reasoning = lib.mkOption {
@@ -148,6 +190,14 @@ in
             "--parallel"
             "1"
             "--no-warmup"
+          ]
+          ++ lib.optionals (lcfg.temperature != null) [
+            "--temp"
+            (toString lcfg.temperature)
+          ]
+          ++ lib.optionals (lcfg.seed != null) [
+            "--seed"
+            (toString lcfg.seed)
           ]
           ++ lcfg.extraArgs
         );

@@ -85,14 +85,26 @@
           haskell = prev.haskell // {
             packages = prev.haskell.packages // {
               ${compiler} = prev.haskell.packages.${compiler}.override (old: {
-                overrides = final.lib.composeExtensions (old.overrides or (_: _: { })) (
-                  hself: hsuper: {
-                    grace = hlib.dontCheck (
-                      hlib.dontHaddock (hsuper.callPackage "${grace}/dependencies/grace.nix" { })
-                    );
+                # Grace's whole dependencies/ directory, not just grace.nix.
+                #
+                # Grace's own flake builds every file in that directory with
+                # packagesFromDirectory, which pins the versions Grace was
+                # written against, openai among them. Taking only grace.nix
+                # let the rest fall through to Hackage, and a nixpkgs bump
+                # marked Hackage's openai broken, which stopped every host in
+                # neoblade-config from evaluating: the fleet's llmq does not
+                # link Grace, but its derivation lists it, so evaluating llmq
+                # evaluates Grace's dependencies. Using Grace's pins is what
+                # Grace itself does.
+                overrides = final.lib.composeManyExtensions [
+                  (old.overrides or (_: _: { }))
+                  (hlib.packagesFromDirectory { directory = "${grace}/dependencies"; })
+                  (hself: hsuper: {
+                    grace = hlib.dontCheck (hlib.dontHaddock hsuper.grace);
+                    openai = hlib.dontCheck hsuper.openai;
                     open-slop = hsuper.callPackage ./nix/open-slop.nix { };
-                  }
-                );
+                  })
+                ];
               });
             };
           };

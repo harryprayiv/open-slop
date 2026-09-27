@@ -45,8 +45,8 @@
         "utils": "utils"
       },
       "locked": {
-        "lastModified": 1790132500,
-        "narHash": "sha256-rSBqSaCRb9l+hvL7haWRA9sy/b2xW2PNY+GGiH1bYm4=",
+        "lastModified": 1790516693,
+        "narHash": "sha256-vgNyiNFfUDAMiLQ8fAr6dJw/jZqU2PkGXAd73zSFxGk=",
         "path": "/home/bismuth/git/grace",
         "type": "path"
       },
@@ -58,11 +58,11 @@
     "llama-cpp-prismml": {
       "flake": false,
       "locked": {
-        "lastModified": 1789770275,
-        "narHash": "sha256-KDecY+v9S/193mLGse5EsJPugZR1wxWzOlOU7GuMd5Y=",
+        "lastModified": 1790361756,
+        "narHash": "sha256-SNBAC+dNTwQxpGmKyG7i/8eqCNg6985DXtqGbzWgwFA=",
         "owner": "PrismML-Eng",
         "repo": "llama.cpp",
-        "rev": "9a9394a895b96003ca842a6041cb28ac49a108f7",
+        "rev": "adfffbe41b2cabcd51fff326ab045662265062bb",
         "type": "github"
       },
       "original": {
@@ -89,11 +89,11 @@
     },
     "nixpkgs_2": {
       "locked": {
-        "lastModified": 1789785513,
-        "narHash": "sha256-B44WL6h0XoLjJ41bUPJk0X5SDinLCII//6EcBLXKiJ0=",
+        "lastModified": 1790323409,
+        "narHash": "sha256-VVTPf+Hyd5ebpjBMHmrLMSBIeW6ls48Bqtosj7CNKLA=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "20b1ddd1aa5ace70c9468305030aa4f9ef79671b",
+        "rev": "e94cb152ed51bd6e24eb4a41f1460252beb52cd2",
         "type": "github"
       },
       "original": {

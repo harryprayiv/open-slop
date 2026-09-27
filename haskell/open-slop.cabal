@@ -50,6 +50,7 @@ library
     OpenSlop.Catalogue
     OpenSlop.Chunk
     OpenSlop.Claim
+    OpenSlop.Chase
     OpenSlop.Engine
     OpenSlop.Gateway.Keys
     OpenSlop.Gateway.Route
