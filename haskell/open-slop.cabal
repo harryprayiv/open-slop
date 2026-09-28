@@ -146,11 +146,16 @@ executable llmq-models
   import:          shared
   hs-source-dirs:  app/llmq-models
   main-is:         Main.hs
+  -- threaded: the thinking indicator runs in its own thread while the
+  -- answer is read from llmq's output.
+  ghc-options:     -threaded
   build-depends:
     aeson,
+    bytestring,
     process,
     scientific,
-    text
+    text,
+    time
 
 executable llmq-grace
   import:          shared
