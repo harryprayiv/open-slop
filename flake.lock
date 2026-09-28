@@ -45,14 +45,17 @@
         "utils": "utils"
       },
       "locked": {
-        "lastModified": 1790537301,
-        "narHash": "sha256-ZP8ZK571VhtQOUYVRLXxDR2kM84TIgUpmuvchYqpYDs=",
-        "path": "/home/bismuth/git/grace",
-        "type": "path"
+        "lastModified": 1790537297,
+        "narHash": "sha256-HuXf87HNSxy4eJyykTNR+orafo1YP4yGkf641juE4W0=",
+        "owner": "harryprayiv",
+        "repo": "grace",
+        "rev": "9cc1a0511ceb37f27647ff185268fe7b275dc37f",
+        "type": "github"
       },
       "original": {
-        "path": "/home/bismuth/git/grace",
-        "type": "path"
+        "owner": "harryprayiv",
+        "repo": "grace",
+        "type": "github"
       }
     },
     "llama-cpp-prismml": {
