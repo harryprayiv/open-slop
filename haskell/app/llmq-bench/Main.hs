@@ -11,10 +11,6 @@
 -- emits JSON shaped for services.open-slop.catalogue.extra, so a new model
 -- is described by measuring it rather than by editing open-slop.
 --
--- Which models a machine runs is the consumer's business, not open-slop's.
--- The output belongs in the consumer's repository, committed beside the
--- host that serves the models, and imported as catalogue.extra there.
---
 -- It needs no configuration: the endpoints come from the catalogue llmq
 -- already reads ($OPEN_SLOP_CATALOGUE, which Nix writes with the consumer's
 -- endpoints in it), and the models come from each server's own listing.
@@ -142,7 +138,7 @@ main = do
                 say ("bench " <> endpointId ep <> "/" <> name)
                 m <- bench o client ep b name
                 report m
-                pure (Just (ep.backend, name, entryFor day ep b (lookupModel cat ep.backend name) name m))
+                pure (Just (ep.backend, catalogueKey name, entryFor day ep b (lookupModel cat ep.backend name) name m))
 
   let byBackend =
         Map.fromListWith
@@ -381,6 +377,20 @@ report m = do
   say ("  window: " <> maybe "not reported" (T.pack . show) m.window <> "; schema: " <> m.schema)
   forM_ m.problems \p -> say ("  PROBLEM " <> p)
   when (null m.prefill && isNothing m.decode) (say "  nothing measured")
+
+-- | The key a model's entry is written under: the served name without
+-- ollama's ":latest".
+--
+-- ollama reports a model registered as "sully" as "sully:latest", while
+-- the consumer declares it, and catalogue-check looks it up, as "sully".
+-- lookupModel already treats the two as the same model when reading. The
+-- first version of this program wrote the entry under the served name, so
+-- a model the catalogue describes as "sully" gained a second, measured-only
+-- entry under "sully:latest" with no summary, and llmq refused to load the
+-- whole catalogue (2026-09-28). Writing under the stripped name merges the
+-- measurement into the entry that already describes the model.
+catalogueKey :: Text -> Text
+catalogueKey t = maybe t id (T.stripSuffix ":latest" t)
 
 pathTo :: [Text] -> Value -> Maybe Value
 pathTo [] v = Just v
