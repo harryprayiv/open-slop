@@ -1,7 +1,7 @@
 { mkDerivation, aeson, base, base16-bytestring, bytestring
 , containers, cryptohash-sha256, directory, filelock, filepath
 , grace, http-client, http-client-tls, http-types, lib
-, optparse-applicative, scientific, tasty, tasty-hunit
+, optparse-applicative, process, scientific, tasty, tasty-hunit
 , tasty-quickcheck, text, time, typed-process, unix, wai, warp
 , warp-tls
 }:
@@ -18,8 +18,8 @@ mkDerivation {
   ];
   executableHaskellDepends = [
     aeson base bytestring containers directory filepath grace
-    optparse-applicative scientific text time typed-process unix warp
-    warp-tls
+    optparse-applicative process scientific text time typed-process
+    unix warp warp-tls
   ];
   testHaskellDepends = [
     aeson base bytestring containers tasty tasty-hunit tasty-quickcheck
