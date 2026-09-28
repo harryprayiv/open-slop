@@ -8,14 +8,21 @@
 --
 --   llmq-models                    plain table, fastest decode first
 --   llmq-models --sort prefill     sorted by another column
---   llmq-models --tui              interactive: move, sort, read details
+--   llmq-models --tui              interactive: pick a model and ask it
 --
 -- The interactive mode is plain ANSI escape codes over the terminal, with no
 -- TUI library: one screen, one table, a detail pane. Keys:
 --
 --   j k, arrows     move            s    next sort column
 --   g G             top, bottom     r    reverse the sort
---   enter, space    details         q    quit
+--   enter, a        ask the selected model a question
+--   d, space        show or hide its details
+--   q               quit
+--
+-- Asking hands the question to `llmq ask -m BACKEND/NAME`, the same command
+-- you would type, with its output going straight to the terminal as it
+-- streams. When it finishes, any key returns to the table with the same
+-- model selected. An empty question cancels.
 --
 -- Columns, all from the catalogue entry and its `measured` block:
 --
@@ -30,7 +37,7 @@
 -- unmeasured model is information too.
 module Main (main) where
 
-import Control.Exception (finally)
+import Control.Exception (SomeException, finally, try)
 import Data.Aeson (Value (..), eitherDecodeFileStrict)
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
@@ -45,7 +52,7 @@ import Data.Text.IO qualified as TIO
 import System.Environment (getArgs, lookupEnv)
 import System.Exit (exitFailure)
 import System.IO
-import System.Process (readCreateProcess, shell)
+import System.Process (callProcess, readCreateProcess, shell)
 import Text.Printf (printf)
 import Text.Read (readMaybe)
 
@@ -276,17 +283,58 @@ runTui :: [Row] -> SortKey -> IO ()
 runTui rs k = do
   oldBuf <- hGetBuffering stdin
   oldEcho <- hGetEcho stdin
+  enterScreen
+  loop (Tui rs k False 0 False)
+    `finally` do
+      leaveScreen
+      hSetBuffering stdin oldBuf
+      hSetEcho stdin oldEcho
+
+-- | Raw keys, no echo, the alternate screen and a hidden cursor: the table.
+enterScreen :: IO ()
+enterScreen = do
   hSetBuffering stdin NoBuffering
   hSetEcho stdin False
   hSetBuffering stdout (BlockBuffering Nothing)
-  -- Alternate screen and hidden cursor, restored however the loop ends.
   TIO.putStr "\ESC[?1049h\ESC[?25l"
-  loop (Tui rs k False 0 False)
-    `finally` do
-      TIO.putStr "\ESC[?25h\ESC[?1049l"
+  hFlush stdout
+
+-- | Back to the normal screen with a visible cursor and line input: where
+-- the question is typed and the answer streams.
+leaveScreen :: IO ()
+leaveScreen = do
+  TIO.putStr "\ESC[?25h\ESC[?1049l"
+  hFlush stdout
+  hSetBuffering stdout LineBuffering
+  hSetBuffering stdin LineBuffering
+  hSetEcho stdin True
+
+-- | Ask the selected model one question through llmq, then come back.
+--
+-- The answer is printed on the normal screen, so it stays in the
+-- terminal's scrollback after the table is redrawn over it.
+askModel :: Row -> IO ()
+askModel r = do
+  leaveScreen
+  let target = r.backend <> "/" <> r.model
+  TIO.putStrLn ""
+  TIO.putStr ("ask " <> target <> " (empty line cancels): ")
+  hFlush stdout
+  q <- T.strip <$> TIO.getLine
+  if T.null q
+    then enterScreen
+    else do
+      TIO.putStrLn ""
+      result <- try (callProcess "llmq" ["ask", "-m", T.unpack target, T.unpack q])
+      case result of
+        Left (e :: SomeException) -> TIO.putStrLn ("\nllmq failed: " <> T.pack (show e))
+        Right () -> pure ()
+      TIO.putStr "\n[any key returns to the table]"
       hFlush stdout
-      hSetBuffering stdin oldBuf
-      hSetEcho stdin oldEcho
+      hSetBuffering stdin NoBuffering
+      hSetEcho stdin False
+      _ <- getChar
+      enterScreen
 
 loop :: Tui -> IO ()
 loop st = do
@@ -307,7 +355,7 @@ loop st = do
       status =
         "sort: " <> sortName st.key <> (if st.reversed then " (reversed)" else "")
           <> "   " <> T.pack (show (cur + 1)) <> "/" <> T.pack (show n)
-          <> "   j/k move  s sort  r reverse  enter details  q quit"
+          <> "   enter ask  d details  j/k move  s sort  r reverse  q quit"
   TIO.putStr "\ESC[H\ESC[2J"
   mapM_ TIO.putStrLn tableLines
   mapM_ TIO.putStrLn detailLines
@@ -324,9 +372,14 @@ loop st = do
     KSort -> loop st' {key = if st.key == maxBound then minBound else succ st.key, cursor = 0}
     KReverse -> loop st' {reversed = not st.reversed, cursor = 0}
     KDetails -> loop st' {showDetails = not st.showDetails}
+    KAsk -> do
+      case drop cur sorted of
+        (r : _) -> askModel r
+        [] -> pure ()
+      loop st'
     KOther -> loop st'
 
-data Key = KUp | KDown | KTop | KBottom | KSort | KReverse | KDetails | KQuit | KOther
+data Key = KUp | KDown | KTop | KBottom | KSort | KReverse | KDetails | KAsk | KQuit | KOther
 
 readKey :: IO Key
 readKey = do
@@ -339,7 +392,9 @@ readKey = do
     'G' -> pure KBottom
     's' -> pure KSort
     'r' -> pure KReverse
-    '\n' -> pure KDetails
+    '\n' -> pure KAsk
+    'a' -> pure KAsk
+    'd' -> pure KDetails
     ' ' -> pure KDetails
     '\ESC' -> do
       -- An arrow key arrives as ESC [ A..D; a lone ESC is quit.
