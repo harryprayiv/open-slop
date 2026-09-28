@@ -6,31 +6,40 @@
   # ==========================================================================
   #
   # nixpkgs' Haskell infrastructure with one compiler pinned, an overlay that
-  # adds Grace's package set, hpkgs.shellFor for the dev shell. Not
-  # haskell.nix: this package has thirteen ordinary dependencies and one git
-  # input, and haskell.nix would add a hackage index, import-from-derivation
-  # and a repackaging of Grace for no gain here.
+  # adds open-slop, hpkgs.shellFor for the dev shell. Not haskell.nix: this
+  # package has thirteen ordinary dependencies and one git input, and
+  # haskell.nix would add a hackage index, import-from-derivation and a
+  # repackaging of Grace for no gain here.
   #
   # The derivation is COMMITTED at nix/open-slop.nix and regenerated with
   # `nix run .#cabal2nix`, so a consumer (neoblade-config, whose checks
   # evaluate every host) never needs import-from-derivation.
   #
   # ==========================================================================
-  # WHY THERE ARE TWO PACKAGES FROM ONE CABAL FILE
+  # TWO HASKELL PACKAGE SETS, AND WHY THE FLEET NEVER SEES GRACE
   # ==========================================================================
   #
   # llmq-grace links Grace, and that closure keeps a reference to the
   # compiler: 4.6 GB, measured 2026-09-23. Nothing that size goes to a Pi.
-  # So the cabal file puts that executable behind the `grace` flag, off by
-  # default:
+  # So the cabal file puts that executable behind the `grace` flag.
   #
-  #   pkgs.open-slop.llmq        llmq, the gateway and llmq-claims: 86 MB
-  #   pkgs.open-slop.llmq-grace  the Grace stage runner: 4.6 GB
+  # Grace also brings its own pinned dependency versions, in its
+  # dependencies/ directory. Putting those into the global package set
+  # replaced the nixpkgs versions for every Haskell package built on every
+  # host, so nothing downstream of them matched cache.nixos.org any more and
+  # an aarch64 row compiled a slice of Hackage from source on each deploy.
   #
-  # The generated derivation is made with the flag ON (`cabal2nix --flag
-  # grace`), so Grace is in the dependency list for both; the flag-off build
-  # does not link it, and Grace being a build input costs time rather than
-  # closure.
+  # So there are two sets:
+  #
+  #   haskell.packages.ghc96   nixpkgs' set plus open-slop built with
+  #                            grace = null. What the fleet gets. No Grace,
+  #                            no Grace pins, everything else substitutes.
+  #   graceHpkgs               that set extended with Grace's dependencies/
+  #                            directory. Used only for llmq-grace, the
+  #                            grace binary and the dev shell, on winsmuth.
+  #
+  #   pkgs.open-slop.llmq        llmq, the gateway, llmq-claims, llmq-bench
+  #   pkgs.open-slop.llmq-grace  the Grace stage runner: 4.6 GB, workstation
   #
   # ==========================================================================
   # OUTPUTS A CONSUMER USES
@@ -80,31 +89,33 @@
         let
           hlib = final.haskell.lib;
           hpkgs = final.haskell.packages.${compiler};
+
+          # The workstation set: the fleet's set plus Grace's own pinned
+          # dependencies, openai among them. Nothing the fleet builds comes
+          # from here.
+          graceHpkgs = hpkgs.extend (
+            final.lib.composeManyExtensions [
+              (hlib.packagesFromDirectory { directory = "${grace}/dependencies"; })
+              (hself: hsuper: {
+                grace = hlib.dontCheck (hlib.dontHaddock hsuper.grace);
+                openai = hlib.dontCheck hsuper.openai;
+                open-slop = hsuper.callPackage ./nix/open-slop.nix { };
+              })
+            ]
+          );
         in
         {
           haskell = prev.haskell // {
             packages = prev.haskell.packages // {
               ${compiler} = prev.haskell.packages.${compiler}.override (old: {
-                # Grace's whole dependencies/ directory, not just grace.nix.
-                #
-                # Grace's own flake builds every file in that directory with
-                # packagesFromDirectory, which pins the versions Grace was
-                # written against, openai among them. Taking only grace.nix
-                # let the rest fall through to Hackage, and a nixpkgs bump
-                # marked Hackage's openai broken, which stopped every host in
-                # neoblade-config from evaluating: the fleet's llmq does not
-                # link Grace, but its derivation lists it, so evaluating llmq
-                # evaluates Grace's dependencies. Using Grace's pins is what
-                # Grace itself does.
-                overrides = final.lib.composeManyExtensions [
-                  (old.overrides or (_: _: { }))
-                  (hlib.packagesFromDirectory { directory = "${grace}/dependencies"; })
-                  (hself: hsuper: {
-                    grace = hlib.dontCheck (hlib.dontHaddock hsuper.grace);
-                    openai = hlib.dontCheck hsuper.openai;
-                    open-slop = hsuper.callPackage ./nix/open-slop.nix { };
-                  })
-                ];
+                overrides = final.lib.composeExtensions (old.overrides or (_: _: { })) (
+                  hself: hsuper: {
+                    # grace = null: the fleet build has the flag off and does
+                    # not link Grace, and passing null keeps Grace and its
+                    # dependency pins out of the fleet's evaluation entirely.
+                    open-slop = hsuper.callPackage ./nix/open-slop.nix { grace = null; };
+                  }
+                );
               });
             };
           };
@@ -112,19 +123,23 @@
           open-slop = {
             catalogue = import ./catalogue;
 
-            # What the fleet gets: llmq, the gateway and llmq-claims, the
-            # `grace` flag at its default of off, so nothing here links Grace
-            # and justStaticExecutables' GHC check passes as it should.
+            # What the fleet gets: llmq, the gateway, llmq-claims and
+            # llmq-bench, built from the plain set, so every dependency is
+            # the nixpkgs version and substitutes from the binary cache.
             llmq = hlib.justStaticExecutables (hlib.dontHaddock hpkgs.open-slop);
 
             # The Grace stage runner. The GHC check is off because it cannot
             # pass; the size is the known cost of linking Grace, and this is
             # a workstation tool, never part of a row's closure.
             llmq-grace = hlib.overrideCabal (
-              hlib.justStaticExecutables (hlib.dontHaddock (hlib.enableCabalFlag hpkgs.open-slop "grace"))
+              hlib.justStaticExecutables (hlib.dontHaddock (hlib.enableCabalFlag graceHpkgs.open-slop "grace"))
             ) (_: { disallowGhcReference = false; });
 
-            grace = hlib.justStaticExecutables (hlib.dontHaddock hpkgs.grace);
+            grace = hlib.justStaticExecutables (hlib.dontHaddock graceHpkgs.grace);
+
+            # Exposed so the dev shell and anything else that needs Grace on
+            # the workstation uses the same set as llmq-grace.
+            inherit graceHpkgs;
 
             llama-cpp-prismml = final.callPackage ./nix/packages/llama-cpp-prismml.nix {
               src = llama-cpp-prismml;
@@ -176,13 +191,11 @@
       let
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [
-            grace.overlays.${compiler}
-            overlay
-          ];
+          overlays = [ overlay ];
         };
 
         hpkgs = pkgs.haskell.packages.${compiler};
+        graceHpkgs = pkgs.open-slop.graceHpkgs;
       in
       {
         packages = {
@@ -211,6 +224,11 @@
             program = "${pkgs.open-slop.llmq}/bin/llmq-claims";
           };
 
+          bench = {
+            type = "app";
+            program = "${pkgs.open-slop.llmq}/bin/llmq-bench";
+          };
+
           grace = {
             type = "app";
             program = "${pkgs.open-slop.grace}/bin/grace";
@@ -223,6 +241,8 @@
           # without it the llmq-grace derivation, which turns the flag on,
           # configures with a dependency the package set was never told
           # about and fails with "missing or private dependencies: grace".
+          # The fleet build passes grace = null, so listing it costs the
+          # fleet nothing.
           #
           # The configureFlags line cabal2nix writes for that flag is then
           # removed, because it would turn the flag on for EVERY build from
@@ -259,10 +279,12 @@
           open-slop-tests = hpkgs.open-slop;
         };
 
-        devShells.default = hpkgs.shellFor {
-          packages = _: [ hpkgs.open-slop ];
+        # The workstation shell: the Grace set, so `cabal build --flag grace`
+        # finds Grace and its pinned dependencies.
+        devShells.default = graceHpkgs.shellFor {
+          packages = _: [ graceHpkgs.open-slop ];
 
-          nativeBuildInputs = with hpkgs; [
+          nativeBuildInputs = with graceHpkgs; [
             cabal-install
             haskell-language-server
             ghcid
