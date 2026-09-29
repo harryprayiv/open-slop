@@ -1,5 +1,21 @@
-# The inference backends, and the models they serve: what each one is, what it
-# costs, and what it is for.
+# The inference backends: what each engine is, what it costs, and what it is
+# for.
+#
+# ============================================================================
+# NO MODELS HERE
+# ============================================================================
+#
+# Which models a machine serves, and everything known about them, belongs to
+# the consumer's configuration, not to open-slop. A consumer supplies them
+# through services.open-slop.catalogue.extra (and programs.llmq.catalogue.extra
+# on the clients): measured entries written by llmq-bench, and whatever it
+# writes by hand about each model. `models` below is empty on purpose.
+#
+# Until 2026-09-29 this file also carried descriptions of the models one fleet
+# happened to run, including two Bonsai builds that fleet had stopped serving.
+# Every client listed them anyway, as unmeasured models nothing answered for.
+# Those descriptions moved to that fleet's own configuration; the Bonsai
+# figures remain in this file's git history.
 #
 # PLAIN DATA, NOT A MODULE. Read by:
 #
@@ -10,8 +26,8 @@
 #                                    that server is changed here rather than
 #                                    on a host
 #   nix/modules/gateway.nix          the loopback catalogue it serves
-#   nix/modules/catalogue-check.nix  warns when a row declares a model this
-#                                    file does not describe
+#   nix/modules/catalogue-check.nix  warns when a row declares a model the
+#                                    merged catalogue does not describe
 #   nix/modules/client.nix           writes it as JSON for llmq, with the
 #                                    consumer's endpoints added
 #
@@ -46,7 +62,8 @@
 #                   turning long source text into reference documentation
 #                   specifically.
 #
-# A model entry may override ctx and predict. Everything else is per backend.
+# The last two are fields of a model entry, which the consumer writes. A model
+# entry may override ctx and predict. Everything else is per backend.
 #
 # ============================================================================
 # CHANGING A NUMBER CHANGES EVERY NEW llmq JOB, AND NO EXISTING ONE
@@ -195,203 +212,7 @@
     };
   };
 
-  models = {
-    llamacpp = {
-      "qwen2.5-coder-7b" = {
-        summary = "code-tuned 7B, the typed-pipeline model, 0.98 tok/s";
-        docFit = "best";
-        tokPerSec = 0.98;
-        licence = "Apache-2.0";
-        blurb = ''
-          Qwen2.5-Coder 7B Instruct, Q4_K_M, about 4.7 GB, served by
-          llama-server as a store-pinned GGUF rather than through ollama's
-          private blob store.
 
-          Measured 2026-09-26 under a JSON Schema on a 4,700-token prompt:
-          0.975 tok/s decode, 1.0 s warm prefill, 235 output tokens in 240
-          seconds. Constrained decoding costs nothing against free text.
-
-          With minItems on an array in the schema, it returns one record per
-          subject and cannot stop early. Without it, on the same input, it
-          returned one record where two were asked for.
-        '';
-      };
-
-      "bonsai-2-27b" = {
-        summary = "Ternary Bonsai 2 27B, PQ2_0, 0.66 tok/s";
-        docFit = "unsuitable";
-        tokPerSec = 0.66;
-        licence = "Apache-2.0";
-        blurb = ''
-          Bonsai 2 27B, Qwen3.5-based, ternary weights in the PQ2_0 pack,
-          7.2 GB, served by llama-server with reasoning off.
-
-          Measured 2026-09-20 (llama-bench, four threads): prefill 0.98
-          tok/s, decode 0.66 tok/s, both on short prompts. A 16K prompt is
-          over four hours before the first output token. Not a working model
-          on a Pi 5; kept in the catalogue so the number is not remeasured.
-        '';
-      };
-
-      "bonsai-8b" = {
-        summary = "Ternary Bonsai 8B, PQ2_0, 3.6 tok/s short, 0.47 at 8K";
-        docFit = "unsuitable";
-        tokPerSec = 3.6;
-        licence = "Apache-2.0";
-        blurb = ''
-          First-generation Bonsai 8B, Qwen3-8B dense, PQ2_0 pack, 2.2 GB.
-
-          Measured 2026-09-20: prefill 4.62 tok/s and decode 3.60 tok/s at
-          128 tokens (llama-bench); prefill 2.85 and decode 0.47 on a real
-          8,381-token part. The fastest CPU model on the fleet for a short
-          question and slower than qwen2.5-coder at documentation length.
-          tokPerSec above is the short-prompt figure; llmq's dry-run
-          estimate overstates a long job by a factor of seven for this
-          model.
-        '';
-      };
-    };
-
-    cpu = {
-      "qwen2.5-coder:7b" = {
-        summary = "code-tuned 7B on ollama, 0.7 tok/s at 8K";
-        docFit = "best";
-        # 2026-09-20, a real 8,381-token part: prefill 5.7, decode 0.7. On a
-        # 19-token answer the day before it decoded at 2.0. Those prefill
-        # figures came from ollama's own duration fields, which the
-        # 2026-09-26 measurement showed to be unreliable; the decode rates
-        # were taken from wall clock and stand.
-        tokPerSec = 0.7;
-        licence = "Apache-2.0";
-        blurb = ''
-          Qwen2.5-Coder 7B Instruct, Q4_K_M, about 4.7 GB resident.
-          Trained context 32K. llmq asks for 16K, about 0.9 GiB of KV cache.
-
-          The same weights the llamacpp backend serves as a pinned GGUF.
-          Typed work goes there instead, because only llama-server has
-          cache_prompt and a grammar together.
-
-          Reads code more carefully than anything else on the fleet. Its
-          training is dominated by mainstream languages, so expect confident
-          mistakes about type-level Haskell, PureScript rows and effects, and
-          Nix module merge semantics. Check every claim it makes about a
-          type.
-        '';
-      };
-
-      "llama3.1:8b" = {
-        summary = "general 8B, most readable prose, 1.7 tok/s";
-        docFit = "usable";
-        tokPerSec = 1.7;
-        licence = "Llama 3.1 Community License, not OSI-approved";
-        blurb = ''
-          Llama 3.1 8B Instruct, Q4_K_M, about 4.9 GB resident.
-          Trained context 128K. llmq asks for 16K, about 2 GiB of KV cache.
-
-          Writes the most readable prose here, and reads code less carefully
-          than qwen2.5-coder. A 128K request is legal and fits in RAM; at this
-          CPU's prefill rate it is an overnight job for a single part.
-
-          The second family on the fleet, which makes it the cross-check
-          model: a claim two unrelated families derive from the same evidence
-          is as good as this class of system gets.
-        '';
-      };
-
-      sully = {
-        summary = "abliterated Qwen2.5 7B at 3-bit, store-pinned";
-        docFit = "poor";
-        ctx = 8192;
-        tokPerSec = null;
-        licence = "Apache-2.0, from Qwen2.5-7B-Instruct";
-        blurb = ''
-          Qwen2.5-7B-Instruct with its refusal direction removed, Q3_K_M,
-          about 3.8 GB. Pinned by hash through
-          services.open-slop.server.pinnedModels, so the bytes cannot drift.
-
-          General instruct, not code-tuned. Abliteration and a 3-bit quant both
-          cost accuracy, and reference documentation is where that shows first.
-          llmq caps it at 8K context.
-        '';
-      };
-    };
-
-    hailo = {
-      "llama3.2:3b" = {
-        summary = "largest NPU model, 2.5 tok/s";
-        docFit = "poor";
-        tokPerSec = 2.5;
-        licence = "Llama 3.2 Community License, not OSI-approved";
-        blurb = ''
-          Llama 3.2 3B Instruct as an int4 HEF. The biggest model the 5.1.1 zoo
-          offers, and the 5.3.0 zoo drops it.
-
-          Faster per token than either 7-8B on the CPU, with under half the
-          parameters and an eighth of the window. Useful for a one-paragraph
-          summary of one small file, or a closed choice. Not for reference
-          documentation, and not for anything typed: this backend cannot
-          constrain output.
-        '';
-      };
-
-      "qwen2.5-instruct:1.5b" = {
-        summary = "fastest measured, 6.1-6.5 tok/s, 1.5B";
-        docFit = "unsuitable";
-        tokPerSec = 6.1;
-        licence = "Apache-2.0";
-        blurb = ''
-          Qwen2.5 1.5B Instruct as an int4 HEF. The fastest thing on the fleet
-          and the one docs/hailo.md benchmarks against.
-
-          Fine for classification, extraction, a commit-message draft. At 1.5B
-          and a 2K window it restates its input and fills gaps with invented
-          detail.
-        '';
-      };
-
-      "qwen2.5-coder:1.5b" = {
-        summary = "code-tuned 1.5B, rate not measured";
-        docFit = "poor";
-        tokPerSec = null;
-        licence = "Apache-2.0";
-        blurb = ''
-          Qwen2.5-Coder 1.5B Instruct as an int4 HEF. Same size as
-          qwen2.5-instruct:1.5b, so expect a similar rate.
-
-          The only NPU model trained for code. It can name what a short function
-          does. Its explanations of why code is written a certain way are
-          unreliable at this size.
-        '';
-      };
-
-      "qwen2:1.5b" = {
-        summary = "previous-generation 1.5B";
-        docFit = "unsuitable";
-        tokPerSec = null;
-        licence = "Apache-2.0";
-        blurb = ''
-          Qwen2 1.5B Instruct as an int4 HEF. Superseded by
-          qwen2.5-instruct:1.5b at the same size, and kept because the zoo
-          ships it.
-        '';
-      };
-
-      "deepseek_r1_distill_qwen:1.5b" = {
-        summary = "reasoning distill, writes a think block first";
-        docFit = "unsuitable";
-        tokPerSec = null;
-        licence = "MIT, over an Apache-2.0 Qwen base";
-        blurb = ''
-          DeepSeek-R1 distilled into Qwen 1.5B, as an int4 HEF. Emits a
-          reasoning block before its answer, and that block comes out of the
-          same small window and the same slow token budget, which on a
-          2048-token window means the budget is gone before the answer
-          starts. llmq keeps the block in the output rather than guessing
-          where it ends.
-
-          Renamed deepseek_r1:1.5b in the 5.3.0 zoo.
-        '';
-      };
-    };
-  };
+  # Deliberately empty: see NO MODELS HERE at the top of this file.
+  models = { };
 }
