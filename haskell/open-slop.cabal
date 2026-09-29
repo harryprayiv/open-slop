@@ -155,13 +155,14 @@ executable llmq-models
     Models
     Render
     Style
-  -- threaded: the thinking indicator and the live status each run in their
-  -- own thread beside the screen.
+  -- threaded: the thinking indicator, the live status and the key reader
+  -- each run in their own thread beside the screen.
   ghc-options:     -threaded
   build-depends:
     open-slop,
     aeson,
     bytestring,
+    containers,
     directory,
     filepath,
     process,

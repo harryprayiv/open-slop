@@ -42,13 +42,16 @@
 -- backend are still told apart at a glance.
 --
 -- ============================================================================
--- STOPPING, LEAVING, AND KEEPING THE CONVERSATION
+-- STOPPING, LEAVING, SCROLLING, AND KEEPING THE CONVERSATION
 -- ============================================================================
 --
 -- Ctrl-C while a model is answering stops that answer: the request is
 -- dropped, which makes ollama and llama-server stop generating, and the
 -- partial answer stays in the history marked as stopped. Esc, Ctrl-D or
 -- Ctrl-C at the input line returns to the model table.
+--
+-- The whole conversation stays scrollable while the chat is open, including
+-- while a model is answering; ChatScreen describes the keys.
 --
 -- Every conversation is written as it happens to
 -- $XDG_STATE_HOME/open-slop/chats/<start time>.md (~/.local/state when that
@@ -134,9 +137,9 @@ chatWith client liveVar targets = do
     drawTop scr [title w ps, statusLine now w live]
     threadDelay 1000000
   block scr cMuted (fg cGrey (if length ps > 1 then "each message goes to every model above, one after another" else "a conversation; the model sees everything said so far"))
-  stream scr cMuted "esc or ctrl-d returns to the models; ctrl-c stops an answer; /clear starts over"
+  stream scr cMuted "esc returns to the models; ctrl-c stops an answer; pgup, pgdn, the arrows and the mouse wheel scroll, even while a model answers; end catches up; hold shift to select text with the mouse; /clear starts over"
   endBlock scr
-  let keys = keyBar w [("enter", "send"), ("esc", "back to models"), ("ctrl-c", "stop answer"), ("/clear", "start over")] (T.pack (takeFileName file))
+  let keys = keyBar w [("enter", "send"), ("esc", "back to models"), ("ctrl-c", "stop answer"), ("pgup", "scroll back"), ("/clear", "start over")] (T.pack (takeFileName file))
   converse scr keys file ps
   killThread bars
   closeScreen scr
