@@ -60,6 +60,37 @@
 -- the file's name.
 --
 -- ============================================================================
+-- LLAMA-SERVER STARTS AND STOPS BY ITSELF
+-- ============================================================================
+--
+-- llama-server is not resident by default: it holds its whole model, about
+-- 5.5 GB for the 7B, for as long as it runs, so oracle starts it only when
+-- asked. The chat does the asking, so nobody has to know that:
+--
+--   opening a chat with its model   starts it at once if it is not already
+--                                   answering. The request takes a second;
+--                                   loading the model takes about a minute,
+--                                   during which the status line says it is
+--                                   loading and the user can already type.
+--   a message to it                 waits until it answers /health with ok,
+--                                   counting the seconds on the input line,
+--                                   and starts it again first if it has gone
+--                                   down since.
+--   leaving the chat                stops it, if and only if this chat
+--                                   started it. A server started any other
+--                                   way is left running for whoever did.
+--
+-- Starting and stopping is `sudo -n systemctl start|stop
+-- llama-server.service` on the server's host, over ssh as the current user.
+-- /start and /stop do the same by hand and remain for when that is wanted.
+--
+-- sudo -n never prompts: it succeeds only through the passwordless rule the
+-- host grants for exactly these commands (services.open-slop.llamaServer
+-- .controlledBy), and otherwise fails at once with sudo's own message, which
+-- is shown. ssh runs in batch mode for the same reason: a missing key is an
+-- error on screen, not a password prompt hidden behind the chat.
+--
+-- ============================================================================
 -- STAYING INSIDE THE WINDOW
 -- ============================================================================
 --
@@ -79,7 +110,9 @@ import Data.Aeson (Value (..), decodeStrict, object, (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString qualified as B
+import Data.ByteString.Lazy qualified as BL
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
+import Data.List (find)
 import Data.Maybe (fromMaybe)
 import Data.Scientific (toRealFloat)
 import Data.Text (Text)
@@ -87,14 +120,16 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (defaultTimeLocale, formatTime, getZonedTime)
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
-import Live (Live)
+import Live (Live (..))
 import Models
-import OpenSlop.Http (Auth (..), Client, HttpFailure (..), describeFailure, postLines)
+import OpenSlop.Http (Auth (..), Client, HttpFailure (..), describeFailure, getBody, postLines)
 import Render (statusLine)
 import Style
 import System.Directory (createDirectoryIfMissing, getHomeDirectory)
 import System.Environment (lookupEnv)
+import System.Exit (ExitCode (..))
 import System.FilePath (takeFileName, (</>))
+import System.Process (proc, readCreateProcessWithExitCode)
 
 data Turn = Turn
   { role :: Text
@@ -140,9 +175,68 @@ chatWith client liveVar targets = do
   stream scr cMuted "esc returns to the models; ctrl-c stops an answer; pgup, pgdn, the arrows and the mouse wheel scroll, even while a model answers; end catches up; hold shift to select text with the mouse; /clear starts over"
   endBlock scr
   let keys = keyBar w [("enter", "send"), ("esc", "back to models"), ("ctrl-c", "stop answer"), ("pgup", "scroll back"), ("/clear", "start over")] (T.pack (takeFileName file))
-  converse scr keys file ps
+  startedHere <- newIORef False
+  -- Start llama-server now if this chat needs it, so the model loads while
+  -- the first message is being typed.
+  forM_ (find (\p -> p.row.backend == "llamacpp") ps) \p -> do
+    up <- healthy p
+    unless up do
+      setBottom scr (fg cGrey ("  asking " <> hostOf p.url <> " to start llama-server...")) keys
+      r <- serverControl p "start"
+      case r of
+        Right () -> do
+          writeIORef startedHere True
+          block scr cCyan (fg cCyan (bold ("starting llama-server on " <> hostOf p.url)))
+          stream scr cMuted "it runs only while something uses it. Loading the model takes about a minute; the status line above shows it loading, and a message sent before it is ready waits for it. Leaving this chat stops it again."
+          endBlock scr
+        Left e -> do
+          block scr cRed (fg cRed (bold "llama-server could not be started"))
+          stream scr cRed e
+          endBlock scr
+  converse scr keys file (ensureUp scr keys startedHere) ps
+  -- Leave llama-server as it was found: stopped, if this chat started it.
+  mine <- readIORef startedHere
+  when mine $
+    forM_ (find (\p -> p.row.backend == "llamacpp") ps) \p -> do
+      setBottom scr (fg cGrey "  stopping llama-server, which this chat started...") keys
+      _ <- serverControl p "stop"
+      pure ()
   killThread bars
   closeScreen scr
+
+-- | Make sure the participant's server is answering before a message goes
+-- to it. Only llama-server can be down by design; for it, start it if it
+-- is not running and wait until it answers /health with ok. False when it
+-- could not be brought up, with the reason already on screen.
+ensureUp :: Screen -> Text -> IORef Bool -> Participant -> IO Bool
+ensureUp scr keys startedHere p
+  | p.row.backend /= "llamacpp" = pure True
+  | otherwise = do
+      up <- healthy p
+      if up
+        then pure True
+        else do
+          -- Refused outright means the service is stopped, not loading.
+          refused <- isRefused p
+          started <-
+            if refused
+              then do
+                setBottom scr (fg cGrey ("  asking " <> hostOf p.url <> " to start llama-server...")) keys
+                r <- serverControl p "start"
+                case r of
+                  Right () -> writeIORef startedHere True >> pure True
+                  Left e -> do
+                    note scr (fg cRed ("llama-server could not be started: " <> e))
+                    pure False
+              else pure True
+          if not started
+            then pure False
+            else do
+              t0 <- getCurrentTime
+              ok <- waitHealthy scr keys p t0
+              unless ok $
+                note scr (fg cRed "llama-server did not come up within four minutes; its log on the host says why: journalctl -u llama-server")
+              pure ok
 
 title :: Int -> [Participant] -> Text
 title w ps =
@@ -158,35 +252,49 @@ keyBar w keys file =
       right = fg cMuted ("chats/" <> file <> " ")
    in clip w (left <> T.replicate (max 1 (w - visibleLength left - visibleLength right)) " " <> right)
 
-converse :: Screen -> Text -> FilePath -> [Participant] -> IO ()
-converse scr keys file ps = do
+converse :: Screen -> Text -> FilePath -> (Participant -> IO Bool) -> [Participant] -> IO ()
+converse scr keys file ensure ps = do
   input <- readInput scr (fg cAccent (bold " you ❯ ")) keys
   case T.strip <$> input of
     Nothing -> pure ()
     Just q
       | q `elem` ["/back", "/b", "/q", "/quit"] -> pure ()
+      | q == "/start" || q == "/stop" -> do
+          case find (\p -> p.row.backend == "llamacpp") ps of
+            Nothing -> do
+              block scr cMuted (fg cGrey "no model in this chat is served by llama-server")
+              endBlock scr
+            Just p -> control scr keys p (T.drop 1 q)
+          converse scr keys file ensure ps
       | q == "/clear" -> do
           forM_ ps \p -> writeIORef p.history []
           block scr cMuted (fg cGrey "started over: every model has forgotten the conversation")
           endBlock scr
           record file "\n---\n\n*started over*\n"
-          converse scr keys file ps
-      | T.null q -> converse scr keys file ps
+          converse scr keys file ensure ps
+      | T.null q -> converse scr keys file ensure ps
       | otherwise -> do
           block scr cAccent (fg cAccent (bold "you"))
           stream scr cText q
           endBlock scr
           record file ("\n**you**\n\n" <> q <> "\n")
-          forM_ ps \p -> turn scr keys file p q
-          converse scr keys file ps
+          forM_ ps \p -> turn scr keys file ensure p q
+          converse scr keys file ensure ps
 
 -- | One user message to one participant, and its streamed answer.
-turn :: Screen -> Text -> FilePath -> Participant -> Text -> IO ()
-turn scr keys file p q = do
+turn :: Screen -> Text -> FilePath -> (Participant -> IO Bool) -> Participant -> Text -> IO ()
+turn scr keys file ensure p q = do
+  let name = p.row.backend <> "/" <> p.row.model
+  block scr p.colour (fg p.colour (bold ("● " <> name)))
+  up <- ensure p
+  if up then answerTurn scr keys file p q else record file ("\n**" <> name <> "**: no answer: the server could not be started\n")
+
+-- | The part of a turn after the server is known to be answering.
+answerTurn :: Screen -> Text -> FilePath -> Participant -> Text -> IO ()
+answerTurn scr keys file p q = do
   modifyIORef' p.history (<> [Turn "user" q])
   dropped <- fitWindow p
   let name = p.row.backend <> "/" <> p.row.model
-  block scr p.colour (fg p.colour (bold ("● " <> name)))
   when (dropped > 0) $ do
     stream scr cMuted ("(dropped the oldest " <> T.pack (show dropped) <> " messages to fit the window)")
     note scr ""
@@ -238,6 +346,10 @@ turn scr keys file p q = do
       note scr (fg cYellow "stopped · " <> timing)
       record file ("\n**" <> name <> "** (stopped)\n\n" <> full <> "\n")
     (Left e, _) -> throwIO e
+    (Right (Left e), _) | p.row.backend == "llamacpp" && "refused" `T.isInfixOf` e -> do
+      note scr (fg cRed "no answer: llama-server stopped while this message was being sent. " <> fg cGrey "the next message starts it again")
+      record file ("\n**" <> name <> "**: no answer: llama-server is not running\n")
+      modifyIORef' p.history (take (length msgs - 1))
     (Right (Left e), _) -> do
       note scr (fg cRed ("no answer: " <> e))
       record file ("\n**" <> name <> "**: no answer: " <> e <> "\n")
@@ -282,6 +394,91 @@ thinking scr keys p started firstAt = go (0 :: Int)
         keys
       threadDelay 120000
       go (i + 1)
+
+-- | The host part of an endpoint URL: "http://192.168.8.173:8081" gives
+-- "192.168.8.173".
+hostOf :: Text -> Text
+hostOf u = T.takeWhile (/= ':') (fromMaybe u (T.stripPrefix "http://" u))
+
+-- | Run `sudo -n systemctl VERB llama-server.service` on the participant's
+-- host. Left carries ssh's or sudo's own message.
+--
+-- sudo -n never prompts: it succeeds only through the passwordless rule the
+-- host grants for exactly these commands (services.open-slop.llamaServer
+-- .controlledBy). ssh runs in batch mode for the same reason: a missing key
+-- is an error on screen, not a password prompt hidden behind the chat.
+serverControl :: Participant -> Text -> IO (Either Text ())
+serverControl p verb = do
+  (code, _, err) <-
+    readCreateProcessWithExitCode
+      (proc "ssh" ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", T.unpack (hostOf p.url), "sudo", "-n", "systemctl", T.unpack verb, "llama-server.service"])
+      ""
+  pure case code of
+    ExitSuccess -> Right ()
+    ExitFailure n -> Left ("ssh or sudo refused (exit " <> T.pack (show n) <> "): " <> T.strip (T.pack err))
+
+-- | Whether the server answers /health with ok right now.
+healthy :: Participant -> IO Bool
+healthy p = do
+  r <- getBody p.client NoAuth (p.url <> "/health") 3
+  pure case r of
+    Right b -> "\"ok\"" `B.isInfixOf` BL.toStrict b
+    Left _ -> False
+
+-- | Whether nothing is listening at all, as opposed to a server that is up
+-- and still loading its model.
+isRefused :: Participant -> IO Bool
+isRefused p = do
+  r <- getBody p.client NoAuth (p.url <> "/health") 3
+  pure case r of
+    Left (Status _ _) -> False
+    Left _ -> True
+    Right _ -> False
+
+-- | Wait until the server answers /health with ok, counting on the input
+-- line. Four minutes is several times the 7B's load time on oracle.
+waitHealthy :: Screen -> Text -> Participant -> UTCTime -> IO Bool
+waitHealthy scr keys p started = do
+  r <- getBody p.client NoAuth (p.url <> "/health") 3
+  now <- getCurrentTime
+  let secs = realToFrac (diffUTCTime now started) :: Double
+      state = case r of
+        Right b | "\"ok\"" `B.isInfixOf` BL.toStrict b -> Nothing
+        Right _ -> Just "loading the model"
+        Left (Status _ _) -> Just "loading the model"
+        Left _ -> Just "starting"
+  case state of
+    Nothing -> pure True
+    Just what
+      | secs > 240 -> pure False
+      | otherwise -> do
+          setBottom
+            scr
+            (" " <> fg cCyan "◌ llama-server " <> fg cGrey (what <> "  " <> T.pack (show (round secs :: Int)) <> " s") <> fg cMuted "   about a minute for the 7B; your message goes as soon as it is ready")
+            keys
+          threadDelay 2000000
+          waitHealthy scr keys p started
+
+-- | /start and /stop by hand: the same actions as the automatic ones, with
+-- their outcome written into the conversation.
+control :: Screen -> Text -> Participant -> Text -> IO ()
+control scr keys p verb = do
+  block scr cCyan (fg cCyan (bold ((if verb == "start" then "starting" else "stopping") <> " llama-server on " <> hostOf p.url)))
+  setBottom scr (fg cGrey ("  asking " <> hostOf p.url <> " over ssh...")) keys
+  r <- serverControl p verb
+  case r of
+    Left e -> stream scr cRed e >> endBlock scr
+    Right ()
+      | verb == "stop" -> stream scr cGreen "stopped; its memory is free" >> endBlock scr
+      | otherwise -> do
+          t0 <- getCurrentTime
+          ok <- waitHealthy scr keys p t0
+          now <- getCurrentTime
+          let s = duration (realToFrac (diffUTCTime now t0))
+          if ok
+            then stream scr cGreen ("ready after " <> s)
+            else stream scr cRed ("still not answering after " <> s <> "; its log on the host says why: journalctl -u llama-server")
+          endBlock scr
 
 -- | Where this conversation is written, created if needed.
 transcriptFile :: IO FilePath

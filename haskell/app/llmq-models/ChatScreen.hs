@@ -67,6 +67,7 @@ import Control.Concurrent (ThreadId, forkIO, killThread)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception (AsyncException (..), IOException, try)
+import Control.Monad (unless)
 import Data.Char (isControl, isDigit)
 import Data.Foldable (toList)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
@@ -315,17 +316,35 @@ stream s colour t = writeIORef s.wordColour colour >> mapM_ step (T.unpack t)
       newLineWith s (fg bar "▌ ") 2
 
 -- | Finish the current block: whatever word is still held is written, in
--- the colour of the text it came from.
+-- the colour of the text it came from, and nothing else, so a block that
+-- received no text still ends on its bare bar line.
 endBlock :: Screen -> IO ()
 endBlock s = do
   colour <- readIORef s.wordColour
-  stream s colour " "
+  w <- readIORef s.word
+  unless (T.null w) do
+    writeIORef s.word ""
+    col <- readIORef s.column
+    if col + T.length w > s.width - 2 && col > 2
+      then do
+        bar <- readIORef s.barColour
+        newLineWith s (fg bar "▌ ") 2
+        append s (fg colour w) (T.length w)
+      else append s (fg colour w) (T.length w)
 
--- | A line under the current block, such as an answer's timing.
+-- | A line under the current block, such as an answer's timing. It takes
+-- the place of the line being written when that line holds only the bar,
+-- as it does after an answer that ended on a line break or never started.
 note :: Screen -> Text -> IO ()
 note s t = do
   bar <- readIORef s.barColour
-  newLineWith s (fg bar "▌ " <> t) (2 + visibleLength t)
+  col <- readIORef s.column
+  if col <= 2
+    then withMVar s.lock \_ -> do
+      writeIORef s.current (fg bar "▌ " <> t)
+      writeIORef s.column (2 + visibleLength t)
+      drawRegion s
+    else newLineWith s (fg bar "▌ " <> t) (2 + visibleLength t)
 
 -- ===========================================================================
 -- Keys
