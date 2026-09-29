@@ -92,7 +92,7 @@ columns :: [(Text, Int, Bool)]
 columns =
   -- (heading, width, right-aligned)
   [ ("", 2, False)
-  , ("backend", 9, False)
+  , ("backend", 11, False)
   , ("model", 31, False)
   , ("params", 7, True)
   , ("decode", 20, False)
