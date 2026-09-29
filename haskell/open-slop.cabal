@@ -150,6 +150,7 @@ executable llmq-models
   main-is:         Main.hs
   other-modules:
     Chat
+    ChatScreen
     Live
     Models
     Render
@@ -161,6 +162,8 @@ executable llmq-models
     open-slop,
     aeson,
     bytestring,
+    directory,
+    filepath,
     process,
     scientific,
     text,

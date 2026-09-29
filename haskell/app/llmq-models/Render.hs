@@ -36,10 +36,12 @@ resident live r = case r.backend of
 
 -- | One line about the machine itself: each server answering or not, load,
 -- memory, temperature, what is in memory and for how long, and how old
--- this picture is.
+-- this picture is. Complete with its background, full width, because the
+-- width cut resets every attribute and a background applied around it
+-- afterwards would stop where the text does.
 statusLine :: UTCTime -> Int -> Live -> Text
 statusLine now width live =
-  clip width $
+  clip width . bg cPanel . padTo width $
     case live.fetchedAt of
       Nothing -> fg cMuted " asking oracle..."
       Just t ->

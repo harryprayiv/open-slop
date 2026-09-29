@@ -63,12 +63,13 @@
 -- THE MODULES
 -- ============================================================================
 --
---   Models   the catalogue read into rows, and sorting
---   Style    colours, width-aware text, terminal control
---   Render   the table, panel, graph and answers screens
---   Chat     conversations with one model or several at once
---   Live     what oracle is doing right now, fetched in the background
---   Main     options and the interactive loop
+--   Models      the catalogue read into rows, and sorting
+--   Style       colours, width-aware text, terminal control
+--   Render      the table, panel, graph and answers screens
+--   Chat        conversations with one model or several at once
+--   ChatScreen  the chat's screen: fixed bars, scrolling conversation, input
+--   Live        what oracle is doing right now, fetched in the background
+--   Main        options and the interactive loop
 module Main (main) where
 
 import Chat (chatWith)
@@ -216,7 +217,7 @@ loop env st = do
   mapM_
     (\l -> TIO.putStr (l <> "\ESC[K\n"))
     ( titleBar width st n
-        : bg cPanel (padTo width (statusLine now width live))
+        : statusLine now width live
         : map (clip width) (take (height - 3) body)
     )
   TIO.putStr "\ESC[J"
@@ -247,7 +248,7 @@ loop env st = do
     KAsk -> do
       let chosen = if null st.marked then maybe [] pure selectedRow else [r | r <- st.rows, isMarked st r]
           withUrl = [(r, u) | r <- chosen, Just u <- [lookup r.backend env.eps]]
-      if null withUrl then pure () else chatWith env.client withUrl
+      if null withUrl then pure () else chatWith env.client env.liveVar withUrl
       loop' st'
     KOther -> loop' st'
 

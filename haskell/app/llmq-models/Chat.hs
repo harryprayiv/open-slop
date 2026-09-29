@@ -1,6 +1,6 @@
 -- | Chatting with one model, or with several at once to compare them.
 --
--- Part of llmq-models; Main describes the program.
+-- Part of llmq-models; Main describes the program, ChatScreen the screen.
 --
 -- ============================================================================
 -- A CONVERSATION, NOT A QUERY
@@ -32,42 +32,66 @@
 -- each answers from its own history, so it is two or three separate
 -- conversations that happen to receive the same user messages. They are
 -- asked one after another, not at once: two models on oracle's CPU would
--- slow each other down and, at 8B, may not both fit in memory. The cost of
--- that is visible: comparing two large CPU models can make ollama unload
--- one to load the other on every turn, which shows as a load delay before
--- each answer. A CPU model against an NPU model runs on separate hardware
--- and has no such cost.
+-- slow each other down and, at 8B, may not both fit in memory. Comparing
+-- two large CPU models can make ollama unload one to load the other on
+-- every turn, which shows as a long wait for the first words. A CPU model
+-- against an NPU model runs on separate hardware and has no such cost.
+--
+-- Each participant gets its own colour, used for its name, the bar beside
+-- its answers and its chip in the title bar, so two models on the same
+-- backend are still told apart at a glance.
+--
+-- ============================================================================
+-- STOPPING, LEAVING, AND KEEPING THE CONVERSATION
+-- ============================================================================
+--
+-- Ctrl-C while a model is answering stops that answer: the request is
+-- dropped, which makes ollama and llama-server stop generating, and the
+-- partial answer stays in the history marked as stopped. Esc, Ctrl-D or
+-- Ctrl-C at the input line returns to the model table.
+--
+-- Every conversation is written as it happens to
+-- $XDG_STATE_HOME/open-slop/chats/<start time>.md (~/.local/state when that
+-- is unset), one paragraph per message and no hard wrapping, so a
+-- comparison can be read again after the screen is gone. The key bar shows
+-- the file's name.
 --
 -- ============================================================================
 -- STAYING INSIDE THE WINDOW
 -- ============================================================================
 --
 -- A history outgrows a model's window, the NPU's 2,048 tokens soonest. Before
--- each turn the oldest exchanges are dropped until the history fits the
+-- each turn the oldest messages are dropped until the history fits the
 -- window less the reply budget, estimated with the backend's bytes per token,
 -- and the screen says how many were dropped. Without that, ollama and
 -- hailo-ollama would silently lose the front of the prompt instead.
 module Chat (chatWith) where
 
-import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.MVar (MVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, tryReadMVar)
-import Control.Exception (IOException, try)
-import Control.Monad (forM_, unless, when)
+import ChatScreen
+import Control.Concurrent (forkIO, killThread, threadDelay)
+import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
+import Control.Exception (AsyncException (..), throwIO, try)
+import Control.Monad (forM_, forever, unless, when)
 import Data.Aeson (Value (..), decodeStrict, object, (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString qualified as B
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe)
 import Data.Scientific (toRealFloat)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Data.Time (defaultTimeLocale, formatTime, getZonedTime)
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
+import Live (Live)
 import Models
 import OpenSlop.Http (Auth (..), Client, HttpFailure (..), describeFailure, postLines)
+import Render (statusLine)
 import Style
-import System.IO
+import System.Directory (createDirectoryIfMissing, getHomeDirectory)
+import System.Environment (lookupEnv)
+import System.FilePath (takeFileName, (</>))
 
 data Turn = Turn
   { role :: Text
@@ -76,11 +100,18 @@ data Turn = Turn
 
 data Participant = Participant
   { row :: Row
+  , client :: Client
   , url :: Text
+  , colour :: Int
   , history :: IORef [Turn]
   , hailoChat :: IORef Bool
   -- ^ whether hailo-ollama's /api/chat works; False after one refusal
   }
+
+-- | One colour per participant, in the order they were marked, chosen to be
+-- distinct from each other and from the user's accent.
+participantColours :: [Int]
+participantColours = [215, 213, 80, 150, 75]
 
 -- | Output tokens asked for per reply. Enough for a real answer; small
 -- enough that a runaway model on a 2 tok/s backend stops within minutes.
@@ -88,112 +119,178 @@ replyBudget :: Int
 replyBudget = 512
 
 -- | Chat with the given models, each with the URL of its server, until the
--- user types /back or ends input. Returns to the caller's screen.
-chatWith :: Client -> [(Row, Text)] -> IO ()
-chatWith client targets = do
-  leaveScreen
-  ps <- mapM (\(r, u) -> Participant r u <$> newIORef [] <*> newIORef True) targets
-  TIO.putStrLn ""
-  TIO.putStrLn (bold (fg cAccent (if length ps > 1 then "comparing" else "chat")) <> "  " <> T.intercalate (fg cMuted "  vs  ") (map (label . (.row)) ps))
-  TIO.putStrLn (fg cMuted "  /back returns to the models    /clear starts over    each message goes to every model listed")
-  conversation client ps
-  enterScreen
+-- user leaves. Returns with the terminal as the model table left it.
+chatWith :: Client -> MVar Live -> [(Row, Text)] -> IO ()
+chatWith client liveVar targets = do
+  ps <- mapM (\((r, u), c) -> Participant r client u c <$> newIORef [] <*> newIORef True) (zip targets (cycle participantColours))
+  (h, w) <- termSize
+  scr <- openScreen h w
+  file <- transcriptFile
+  record file ("# " <> T.intercalate " vs " [p.row.backend <> "/" <> p.row.model | p <- ps] <> "\n")
+  -- The title and status bars, kept current once a second like the table's.
+  bars <- forkIO $ forever do
+    now <- getCurrentTime
+    live <- readMVar liveVar
+    drawTop scr [title w ps, statusLine now w live]
+    threadDelay 1000000
+  block scr cMuted (fg cGrey (if length ps > 1 then "each message goes to every model above, one after another" else "a conversation; the model sees everything said so far"))
+  stream scr cMuted "esc or ctrl-d returns to the models; ctrl-c stops an answer; /clear starts over"
+  endBlock scr
+  let keys = keyBar w [("enter", "send"), ("esc", "back to models"), ("ctrl-c", "stop answer"), ("/clear", "start over")] (T.pack (takeFileName file))
+  converse scr keys file ps
+  killThread bars
+  closeScreen scr
 
-label :: Row -> Text
-label r = fg (backendColour r.backend) "● " <> bold (fg cText (r.backend <> "/" <> r.model))
+title :: Int -> [Participant] -> Text
+title w ps =
+  let bar t = bg cBar (fg cText t)
+      chip p = bg p.colour (fg 16 (bold (" " <> p.row.backend <> "/" <> p.row.model <> " ")))
+      left = bar (bold " open-slop" <> "  " <> (if length ps > 1 then "compare" else "chat") <> "   ")
+      chips = T.intercalate (bar " vs ") (map chip ps)
+   in clip w (left <> chips <> bar (T.replicate (max 1 (w - visibleLength left - visibleLength chips)) " "))
 
-conversation :: Client -> [Participant] -> IO ()
-conversation client ps = do
-  TIO.putStr ("\n" <> fg cAccent "you ❯ ")
-  hFlush stdout
-  input <- try TIO.getLine :: IO (Either IOException Text)
+keyBar :: Int -> [(Text, Text)] -> Text -> Text
+keyBar w keys file =
+  let left = T.concat [" " <> bg cSel (fg cText (" " <> k <> " ")) <> fg cGrey (" " <> d) | (k, d) <- keys]
+      right = fg cMuted ("chats/" <> file <> " ")
+   in clip w (left <> T.replicate (max 1 (w - visibleLength left - visibleLength right)) " " <> right)
+
+converse :: Screen -> Text -> FilePath -> [Participant] -> IO ()
+converse scr keys file ps = do
+  input <- readInput scr (fg cAccent (bold " you ❯ ")) keys
   case T.strip <$> input of
-    Left _ -> pure ()
-    Right q
+    Nothing -> pure ()
+    Just q
       | q `elem` ["/back", "/b", "/q", "/quit"] -> pure ()
       | q == "/clear" -> do
           forM_ ps \p -> writeIORef p.history []
-          TIO.putStrLn (fg cMuted "  histories cleared")
-          conversation client ps
-      | T.null q -> conversation client ps
+          block scr cMuted (fg cGrey "started over: every model has forgotten the conversation")
+          endBlock scr
+          record file "\n---\n\n*started over*\n"
+          converse scr keys file ps
+      | T.null q -> converse scr keys file ps
       | otherwise -> do
-          forM_ ps \p -> turn client p q
-          conversation client ps
+          block scr cAccent (fg cAccent (bold "you"))
+          stream scr cText q
+          endBlock scr
+          record file ("\n**you**\n\n" <> q <> "\n")
+          forM_ ps \p -> turn scr keys file p q
+          converse scr keys file ps
 
 -- | One user message to one participant, and its streamed answer.
-turn :: Client -> Participant -> Text -> IO ()
-turn client p q = do
+turn :: Screen -> Text -> FilePath -> Participant -> Text -> IO ()
+turn scr keys file p q = do
   modifyIORef' p.history (<> [Turn "user" q])
   dropped <- fitWindow p
-  TIO.putStrLn ""
-  TIO.putStrLn (label p.row)
-  when (dropped > 0) $
-    TIO.putStrLn (fg cMuted ("  dropped the oldest " <> T.pack (show dropped) <> " messages to fit the window"))
+  let name = p.row.backend <> "/" <> p.row.model
+  block scr p.colour (fg p.colour (bold ("● " <> name)))
+  when (dropped > 0) $ do
+    stream scr cMuted ("(dropped the oldest " <> T.pack (show dropped) <> " messages to fit the window)")
+    note scr ""
   msgs <- readIORef p.history
   started <- getCurrentTime
-  firstAt <- newEmptyMVar
-  answer <- newMVar ("" :: Text)
-  tokens <- newMVar (0 :: Int)
-  reported <- newMVar (Nothing :: Maybe Int)
-  failure <- newMVar (Nothing :: Maybe Text)
+  firstAt <- newIORef (Nothing :: Maybe UTCTime)
+  answer <- newIORef ("" :: Text)
+  tokens <- newIORef (0 :: Int)
+  reported <- newIORef (Nothing :: Maybe Int)
+  failure <- newIORef (Nothing :: Maybe Text)
   notes <- newMVar ([] :: [Text])
-  _ <- forkIO (spinner started firstAt)
+  indicator <- forkIO (thinking scr keys p started firstAt)
   let onText t = unless (T.null t) do
-        seen <- isJust <$> tryReadMVar firstAt
-        unless seen do
-          now <- getCurrentTime
-          putMVar firstAt now
-          threadDelay 60000
-          TIO.putStr "\r\ESC[2K"
-        TIO.putStr t
-        hFlush stdout
-        modifyMVar_ answer (pure . (<> t))
-        modifyMVar_ tokens (pure . (+ 1))
+        seen <- readIORef firstAt
+        when (seen == Nothing) (getCurrentTime >>= writeIORef firstAt . Just)
+        stream scr cText t
+        modifyIORef' answer (<> t)
+        modifyIORef' tokens (+ 1)
       handlers =
         Handlers
           onText
-          (\n -> modifyMVar_ reported (const (pure (Just n))))
-          (\e -> modifyMVar_ failure (const (pure (Just e))))
+          (writeIORef reported . Just)
+          (writeIORef failure . Just)
           (\t -> modifyMVar_ notes (pure . (<> [t])))
-  result <- send client p msgs handlers
-  stopSpinner firstAt
+  result <- try (send p msgs handlers) :: IO (Either AsyncException (Either Text ()))
+  killThread indicator
+  endBlock scr
   finished <- getCurrentTime
-  err <- readMVar failure
-  full <- readMVar answer
+  err <- readIORef failure
+  full <- readIORef answer
   pending <- readMVar notes
+  first <- readIORef firstAt
+  counted <- readIORef tokens
+  n <- fromMaybe counted <$> readIORef reported
+  let total = secs started finished
+      wait = maybe total (secs started) first
+      rate = fromIntegral n / max 0.1 (total - wait)
+      timing =
+        fg cGrey (duration total)
+          <> fg cMuted " in all · first words after "
+          <> fg cGrey (duration wait)
+          <> fg cMuted " · "
+          <> fg cGrey (T.pack (show n) <> " tokens")
+          <> fg cMuted " · "
+          <> fg (rateColour rate) (fmt "%.1f tok/s" rate)
   case (result, err) of
-    (Left e, _) -> TIO.putStrLn (fg cRed ("  no answer: " <> e))
-    (_, Just e) -> TIO.putStrLn (fg cRed ("\n  server error: " <> e))
+    (Left UserInterrupt, _) -> do
+      modifyIORef' p.history (<> [Turn "assistant" (full <> " [stopped]")])
+      note scr (fg cYellow "stopped · " <> timing)
+      record file ("\n**" <> name <> "** (stopped)\n\n" <> full <> "\n")
+    (Left e, _) -> throwIO e
+    (Right (Left e), _) -> do
+      note scr (fg cRed ("no answer: " <> e))
+      record file ("\n**" <> name <> "**: no answer: " <> e <> "\n")
+      modifyIORef' p.history (take (length msgs - 1))
+    (_, Just e) -> do
+      note scr (fg cRed ("server error: " <> e))
+      record file ("\n**" <> name <> "**: server error: " <> e <> "\n")
+      modifyIORef' p.history (take (length msgs - 1))
     _ -> do
       modifyIORef' p.history (<> [Turn "assistant" full])
-      first <- tryReadMVar firstAt
-      counted <- readMVar tokens
-      n <- fromMaybe counted <$> readMVar reported
-      let total = secs started finished
-          wait = maybe total (secs started) first
-          rate = fromIntegral n / max 0.1 (total - wait)
-      TIO.putStrLn ""
-      TIO.putStrLn
-        ( fg cMuted
-            ( "  " <> duration total <> " in all, first words after " <> duration wait
-                <> ", "
-                <> T.pack (show n)
-                <> " tokens at "
-                <> fmt "%.1f tok/s" rate
-            )
-        )
-  forM_ pending \t -> TIO.putStrLn (fg cMuted ("  " <> t))
+      note scr timing
+      record file ("\n**" <> name <> "** (" <> duration total <> ", " <> fmt "%.1f tok/s" rate <> ")\n\n" <> T.strip full <> "\n")
+  forM_ pending \t -> note scr (fg cMuted t)
   where
     secs a b = realToFrac (diffUTCTime b a) :: Double
+    rateColour r
+      | r >= 5 = cGreen
+      | r >= 2 = cYellow
+      | otherwise = cRed
 
-stopSpinner :: MVar UTCTime -> IO ()
-stopSpinner firstAt = do
-  seen <- isJust <$> tryReadMVar firstAt
-  unless seen do
-    now <- getCurrentTime
-    putMVar firstAt now
-    threadDelay 60000
-    TIO.putStr "\r\ESC[2K"
+-- | The input row while a model works: who is thinking, for how long, and
+-- how to stop it. Once the first words arrive it says the model is
+-- answering instead.
+thinking :: Screen -> Text -> Participant -> UTCTime -> IORef (Maybe UTCTime) -> IO ()
+thinking scr keys p started firstAt = go (0 :: Int)
+  where
+    frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" :: String
+    go i = do
+      now <- getCurrentTime
+      seen <- readIORef firstAt
+      let s = round (realToFrac (diffUTCTime now started) :: Double) :: Int
+          verb = maybe "thinking" (const "answering") seen
+      setBottom
+        scr
+        ( " "
+            <> fg p.colour (T.singleton (frames !! (i `mod` length frames)))
+            <> " "
+            <> fg p.colour (bold (p.row.backend <> "/" <> p.row.model))
+            <> fg cGrey (" " <> verb <> "  " <> T.pack (show s) <> " s")
+            <> fg cMuted "   ctrl-c stops it"
+        )
+        keys
+      threadDelay 120000
+      go (i + 1)
+
+-- | Where this conversation is written, created if needed.
+transcriptFile :: IO FilePath
+transcriptFile = do
+  base <- lookupEnv "XDG_STATE_HOME" >>= maybe ((</> ".local/state") <$> getHomeDirectory) pure
+  let dir = base </> "open-slop" </> "chats"
+  createDirectoryIfMissing True dir
+  stamp <- formatTime defaultTimeLocale "%Y-%m-%d-%H%M%S" <$> getZonedTime
+  pure (dir </> (stamp <> ".md"))
+
+record :: FilePath -> Text -> IO ()
+record = TIO.appendFile
 
 -- | Drop the oldest messages, keeping the newest, until the history fits
 -- the window less the reply budget. Returns how many were dropped.
@@ -217,30 +314,30 @@ data Handlers = Handlers
   , onCount :: Int -> IO ()
   , onError :: Text -> IO ()
   , onNote :: Text -> IO ()
-  -- ^ something worth saying about how the answer was obtained, printed
-  -- after it, because the spinner owns the line until the first words
+  -- ^ something worth saying about how the answer was obtained, shown
+  -- under it
   }
 
 -- | Send the history to the participant's server and stream the answer.
-send :: Client -> Participant -> [Turn] -> Handlers -> IO (Either Text ())
-send client p msgs h = case p.row.backend of
-  "llamacpp" -> stream "/v1/chat/completions" openAI openAILine
+send :: Participant -> [Turn] -> Handlers -> IO (Either Text ())
+send p msgs h = case p.row.backend of
+  "llamacpp" -> streamTo "/v1/chat/completions" openAI openAILine
   "hailo" -> do
     useChat <- readIORef p.hailoChat
     if useChat
       then do
-        r <- stream "/api/chat" ollamaChat ollamaChatLine
+        r <- streamTo "/api/chat" ollamaChat ollamaChatLine
         case r of
           Left e | "HTTP 404" `T.isInfixOf` e || "HTTP 500" `T.isInfixOf` e -> do
             writeIORef p.hailoChat False
             h.onNote "this server has no chat route, so the conversation goes to it as a transcript"
-            stream "/api/generate" transcript generateLine
+            streamTo "/api/generate" transcript generateLine
           other -> pure other
-      else stream "/api/generate" transcript generateLine
-  _ -> stream "/api/chat" ollamaChat ollamaChatLine
+      else streamTo "/api/generate" transcript generateLine
+  _ -> streamTo "/api/chat" ollamaChat ollamaChatLine
   where
-    stream path body onLine = do
-      r <- postLines client NoAuth p.url path body onLine
+    streamTo path body onLine = do
+      r <- postLines p.client NoAuth p.url path body onLine
       pure case r of
         Left (Status code b) -> Left ("HTTP " <> T.pack (show code) <> ": " <> T.take 160 (T.pack (show b)))
         Left f -> Left (describeFailure f)
@@ -295,23 +392,6 @@ send client p msgs h = case p.row.backend of
             Just (Array cs) | (c : _) <- foldr (:) [] cs -> forM_ (textAt ["delta", "content"] c) h.onText
             _ -> pure ()
           forM_ (intAt ["timings", "predicted_n"] (Object o)) h.onCount
-
--- | A spinner with the seconds elapsed, until the first words. The first
--- request to a model that is not in memory includes loading it, which on
--- oracle is up to a minute for an 8B.
-spinner :: UTCTime -> MVar UTCTime -> IO ()
-spinner started done = go (0 :: Int)
-  where
-    frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" :: String
-    go i = do
-      finished <- isJust <$> tryReadMVar done
-      unless finished do
-        now <- getCurrentTime
-        let s = round (realToFrac (diffUTCTime now started) :: Double) :: Int
-        TIO.putStr ("\r\ESC[2K  " <> fg cAccent (T.singleton (frames !! (i `mod` length frames))) <> fg cGrey (" thinking  " <> T.pack (show s) <> " s"))
-        hFlush stdout
-        threadDelay 120000
-        go (i + 1)
 
 pathTo :: [Text] -> Value -> Maybe Value
 pathTo [] v = Just v
