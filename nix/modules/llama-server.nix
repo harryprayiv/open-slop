@@ -18,6 +18,20 @@
 # can bring it up and stop it, and measuring can be done with ollama stopped.
 #
 # ============================================================================
+# WHO MAY START AND STOP IT
+# ============================================================================
+#
+# Starting an on-demand server needs root, and a sudo password prompt cannot
+# be answered by anything unattended: an overnight benchmark, a job, a
+# command run over ssh from another machine. On 2026-09-28 that is what
+# kept llama-server out of every benchmark run.
+#
+# `controlledBy` names the users who may run exactly
+#   sudo systemctl start|stop|restart llama-server.service
+# without a password, and nothing else. The rule is written out in full for
+# each verb, so it cannot be widened by an argument.
+#
+# ============================================================================
 # THE BIND ADDRESS IS AN OPTION, LOOPBACK BY DEFAULT
 # ============================================================================
 #
@@ -75,8 +89,8 @@ in
 
     model = lib.mkOption {
       type = types.package;
-      example = lib.literalExpression ''pkgs.open-slop.gguf.qwen25-coder-7b'';
-      description = "A GGUF file in the store. Use an entry of pkgs.open-slop.gguf or pkgs.open-slop.bonsai.";
+      example = lib.literalExpression ''pkgs.fetchurl { url = "..."; hash = "..."; }'';
+      description = "A GGUF file in the store, declared by the consumer.";
     };
 
     host = lib.mkOption {
@@ -140,6 +154,17 @@ in
       type = types.bool;
       default = false;
       description = "Start at boot and keep running. Off means started on demand.";
+    };
+
+    controlledBy = lib.mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "bismuth" ];
+      description = ''
+        Users who may start, stop and restart llama-server.service with sudo
+        and no password, and do nothing else with it. For an on-demand server
+        that an unattended job or a remote command has to bring up.
+      '';
     };
 
     extraArgs = lib.mkOption {
@@ -220,6 +245,26 @@ in
         # Nothing here needs a state directory.
       };
     };
+
+    # Exact commands only. sudo compares the full path of what is run, and
+    # `systemctl` on a user's PATH resolves to /run/current-system/sw/bin.
+    # Both spellings of the unit are listed because both are what people
+    # type.
+    security.sudo.extraRules = lib.mkIf (lcfg.controlledBy != [ ]) [
+      {
+        users = lcfg.controlledBy;
+        commands = lib.concatMap (verb: [
+          {
+            command = "/run/current-system/sw/bin/systemctl ${verb} llama-server.service";
+            options = [ "NOPASSWD" ];
+          }
+          {
+            command = "/run/current-system/sw/bin/systemctl ${verb} llama-server";
+            options = [ "NOPASSWD" ];
+          }
+        ]) [ "start" "stop" "restart" ];
+      }
+    ];
 
     environment.systemPackages = [ lcfg.package ];
 

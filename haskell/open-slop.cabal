@@ -150,13 +150,15 @@ executable llmq-models
   main-is:         Main.hs
   other-modules:
     Ask
+    Live
     Models
     Render
     Style
-  -- threaded: the thinking indicator runs in its own thread while the
-  -- answer is read from llmq's output.
+  -- threaded: the thinking indicator and the live status each run in their
+  -- own thread beside the screen.
   ghc-options:     -threaded
   build-depends:
+    open-slop,
     aeson,
     bytestring,
     process,

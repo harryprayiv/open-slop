@@ -63,17 +63,24 @@
 --   Style    colours, width-aware text, terminal control
 --   Render   the table, panel, graph and answers screens
 --   Ask      asking a model, with the estimate and the thinking indicator
+--   Live     what oracle is doing right now, fetched in the background
 --   Main     options and the interactive loop
 module Main (main) where
 
 import Ask (askModel)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.MVar (MVar, newMVar, readMVar, swapMVar)
 import Control.Exception (finally)
+import Control.Monad (forever, void)
 import Data.Aeson (eitherDecodeFileStrict)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Data.Time.Clock (getCurrentTime)
+import Live
 import Models
+import OpenSlop.Http (newClient)
 import Render
 import Style
 import System.Environment (getArgs, lookupEnv)
@@ -108,8 +115,18 @@ main = do
   doc <- eitherDecodeFileStrict path >>= either die' pure
   let rows = rowsOf doc
   if opts.interactive
-    then runTui rows opts.sortKey
-    else mapM_ TIO.putStrLn (tableLines 120 (sortRows opts.sortKey False rows) Nothing)
+    then do
+      -- The machine is asked in the background every three seconds, so a
+      -- slow or unreachable row never holds up a keypress.
+      liveVar <- newMVar emptyLive
+      client <- newClient
+      let eps = endpointsOf doc
+      void $ forkIO $ forever do
+        l <- fetchLive client eps
+        void (swapMVar liveVar l)
+        threadDelay 3000000
+      runTui liveVar rows opts.sortKey
+    else mapM_ TIO.putStrLn (tableLines (const False) 120 (sortRows opts.sortKey False rows) Nothing)
 
 
 data View = TableView | GraphView | AnswersView
@@ -124,12 +141,12 @@ data Tui = Tui
   , metric :: Metric
   }
 
-runTui :: [Row] -> SortKey -> IO ()
-runTui rs k = do
+runTui :: MVar Live -> [Row] -> SortKey -> IO ()
+runTui liveVar rs k = do
   oldBuf <- hGetBuffering stdin
   oldEcho <- hGetEcho stdin
   enterScreen
-  loop (Tui rs k False 0 TableView MDecode)
+  loop liveVar (Tui rs k False 0 TableView MDecode)
     `finally` do
       leaveScreen
       hSetBuffering stdin oldBuf
@@ -154,47 +171,62 @@ keyBar width =
   where
     keys = [("enter", "ask"), ("v", "view"), ("p", "answers"), ("y", "axis"), ("s", "sort"), ("r", "reverse"), ("j k", "move"), ("q", "quit")]
 
-loop :: Tui -> IO ()
-loop st = do
+-- | Draw, then wait up to a second for a key. With no key the screen is
+-- drawn again, which is how the status line stays current.
+loop :: MVar Live -> Tui -> IO ()
+loop liveVar st = do
   (height, width) <- termSize
+  live <- readMVar liveVar
+  now <- getCurrentTime
   let sorted = sortRows st.key st.reversed st.rows
       n = length sorted
       cur = max 0 (min (n - 1) st.cursor)
       selectedRow = listToMaybe (drop cur sorted)
       body = case st.view of
         TableView ->
-          let panelLines = maybe [] (panel width) selectedRow
-              room = max 1 (height - 4 - length panelLines)
+          let panelLines = maybe [] (\r -> panel (resident live r) width r) selectedRow
+              room = max 1 (height - 5 - length panelLines)
               top = max 0 (cur - room + 1)
-           in tableLines width (take room (drop top sorted)) (Just (cur - top)) <> [""] <> panelLines
-        GraphView -> graphLines width height st.metric sorted cur
+           in tableLines (resident live) width (take room (drop top sorted)) (Just (cur - top)) <> [""] <> panelLines
+        GraphView -> graphLines width (height - 1) st.metric sorted cur
         AnswersView -> case selectedRow of
           Just r -> (bold (fg cText (r.backend <> "/" <> r.model)) <> fg cMuted "   the opening of each answer, as the bench stored it") : "" : answersLines width r
           Nothing -> []
-  TIO.putStr "\ESC[H\ESC[2J"
-  TIO.putStrLn (titleBar width st n)
-  mapM_ (TIO.putStrLn . clip width) (take (height - 2) body)
+  -- Redrawn in place, line by line, each cleared to its end, rather than
+  -- clearing the whole screen first: the screen now redraws every second
+  -- for the status line, and a full clear flickers.
+  TIO.putStr "\ESC[H"
+  mapM_
+    (\l -> TIO.putStr (l <> "\ESC[K\n"))
+    ( titleBar width st n
+        : bg cPanel (padTo width (statusLine now width live))
+        : map (clip width) (take (height - 3) body)
+    )
+  TIO.putStr "\ESC[J"
   TIO.putStr ("\ESC[" <> T.pack (show height) <> ";1H" <> keyBar width)
   hFlush stdout
-  k <- readKey
+  pressed <- hWaitForInput stdin 1000
+  k <- if pressed then readKey else pure KNone
   let st' = st {cursor = cur}
+      loop' = loop liveVar
   case k of
-    KQuit -> if st.view == AnswersView then loop st' {view = TableView} else pure ()
-    KDown -> loop st' {cursor = min (n - 1) (cur + 1)}
-    KUp -> loop st' {cursor = max 0 (cur - 1)}
-    KTop -> loop st' {cursor = 0}
-    KBottom -> loop st' {cursor = n - 1}
-    KSort -> loop st' {key = if st.key == maxBound then minBound else succ st.key, cursor = 0}
-    KReverse -> loop st' {reversed = not st.reversed, cursor = 0}
-    KView -> loop st' {view = if st.view == TableView then GraphView else TableView}
-    KAnswers -> loop st' {view = if st.view == AnswersView then TableView else AnswersView}
-    KAxis -> loop st' {metric = if st.metric == MDecode then MPrefill else MDecode}
+    KQuit -> if st.view == AnswersView then loop' st' {view = TableView} else pure ()
+    KNone -> loop' st'
+    KDown -> loop' st' {cursor = min (n - 1) (cur + 1)}
+    KUp -> loop' st' {cursor = max 0 (cur - 1)}
+    KTop -> loop' st' {cursor = 0}
+    KBottom -> loop' st' {cursor = n - 1}
+    KSort -> loop' st' {key = if st.key == maxBound then minBound else succ st.key, cursor = 0}
+    KReverse -> loop' st' {reversed = not st.reversed, cursor = 0}
+    KView -> loop' st' {view = if st.view == TableView then GraphView else TableView}
+    KAnswers -> loop' st' {view = if st.view == AnswersView then TableView else AnswersView}
+    KAxis -> loop' st' {metric = if st.metric == MDecode then MPrefill else MDecode}
     KAsk -> do
       mapM_ askModel selectedRow
-      loop st'
-    KOther -> loop st'
+      loop' st'
+    KOther -> loop' st'
 
-data Key = KUp | KDown | KTop | KBottom | KSort | KReverse | KView | KAnswers | KAxis | KAsk | KQuit | KOther
+data Key = KUp | KDown | KTop | KBottom | KSort | KReverse | KView | KAnswers | KAxis | KAsk | KQuit | KNone | KOther
 
 readKey :: IO Key
 readKey = do

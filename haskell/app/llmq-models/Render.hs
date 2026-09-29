@@ -8,13 +8,84 @@ module Render
   , Metric (..)
   , graphLines
   , answersLines
+  , statusLine
+  , resident
   ) where
 
 import Data.Maybe (isJust, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time.Clock (UTCTime, diffUTCTime)
+import Data.Time.Format.ISO8601 (iso8601ParseM)
+import Data.Time.LocalTime (ZonedTime, zonedTimeToUTC)
+import Live
 import Models
 import Style
+
+-- | Whether a model is in memory on its server right now. ollama reports
+-- "sully:latest" for the model the catalogue calls "sully", so the tag is
+-- dropped before comparing. llama-server has exactly one model, resident
+-- whenever the server answers /health with ok. The NPU does not say.
+resident :: Live -> Row -> Bool
+resident live r = case r.backend of
+  "cpu" -> any (\l -> stripLatest l.name == stripLatest r.model) live.loaded
+  "llamacpp" -> live.llamaHealth == "ok"
+  _ -> False
+  where
+    stripLatest t = maybe t id (T.stripSuffix ":latest" t)
+
+-- | One line about the machine itself: each server answering or not, load,
+-- memory, temperature, what is in memory and for how long, and how old
+-- this picture is.
+statusLine :: UTCTime -> Int -> Live -> Text
+statusLine now width live =
+  clip width $
+    case live.fetchedAt of
+      Nothing -> fg cMuted " asking oracle..."
+      Just t ->
+        -- Most useful first, because a narrow terminal cuts from the right:
+        -- which servers answer, what is in memory, then the machine.
+        T.intercalate
+          (fg cMuted "  ")
+          ( [ bold (fg cText (" " <> (if T.null live.host then "oracle" else live.host)))
+            , dot live.ollamaUp <> fg cGrey " ollama"
+            , dot live.hailoUp <> fg cGrey " npu"
+            , llama
+            , inMemory
+            ]
+              <> machine
+              <> [fg cMuted (ago t)]
+          )
+  where
+    dot up = if up then fg cGreen "●" else fg cRed "●"
+    llama = case live.llamaHealth of
+      "ok" -> fg cGreen "●" <> fg cGrey (if live.llamaBusy then " llama-server busy" else " llama-server idle")
+      "down" -> fg cMuted "○ llama-server off"
+      s -> fg cYellow "●" <> fg cGrey (" llama-server " <> s)
+    machine
+      | not live.telemetry = [fg cMuted "no telemetry"]
+      | otherwise =
+          [ fg cGrey "load " <> fg cText (maybe "-" (fmt "%.1f") live.load1) <> fg cMuted (maybe "" (\c -> "/" <> T.pack (show c)) live.cores)
+          , fg cGrey "free " <> fg cText (maybe "-" (\a -> fmt "%.1f" (a / 1e9)) live.memAvailable) <> fg cMuted (maybe "" (\m -> "/" <> fmt "%.0fG" (m / 1e9)) live.memTotal)
+          , maybe (fg cMuted "-") (\c -> fg (if c >= 75 then cRed else if c >= 65 then cYellow else cText) (fmt "%.0f°C" c)) live.tempC
+          ]
+    inMemory = case live.loaded of
+      [] -> fg cMuted "nothing in memory"
+      ls ->
+        fg cGrey "◉ "
+          <> T.intercalate
+            ", "
+            [ fg cGreen l.name <> fg cMuted (maybe "" untilUnload l.expiresAt)
+            | l <- ls
+            ]
+    untilUnload e = case iso8601ParseM (T.unpack e) :: Maybe ZonedTime of
+      Just z ->
+        let s = realToFrac (diffUTCTime (zonedTimeToUTC z) now) :: Double
+         in if s > 0 then " for " <> duration s else ""
+      Nothing -> ""
+    ago t =
+      let s = realToFrac (diffUTCTime now t) :: Double
+       in T.pack (show (max 0 (round s :: Int))) <> "s ago"
 
 -- | Column layout shared by the header and every row.
 columns :: [(Text, Int, Bool)]
@@ -39,8 +110,10 @@ layout cells =
     | ((_, w, right), c) <- zip columns cells
     ]
 
-tableLines :: Int -> [Row] -> Maybe Int -> [Text]
-tableLines width rows selected =
+-- | The table. The predicate says which models are in memory right now,
+-- marked with a filled dot beside the name.
+tableLines :: (Row -> Bool) -> Int -> [Row] -> Maybe Int -> [Text]
+tableLines inMemory width rows selected =
   clip width (fg cGrey (layout [h | (h, _, _) <- columns])) : zipWith line [0 ..] rows
   where
     maxDecode = maximum (1 : mapMaybe (.decode) rows)
@@ -50,7 +123,7 @@ tableLines width rows selected =
           cells =
             [ if isSel then fg cAccent "▶" else " "
             , fg (backendColour r.backend) ("● " <> r.backend)
-            , (if isSel then bold else id) (fg cText (T.take 31 r.model))
+            , (if inMemory r then fg cGreen "◉ " else fg cMuted "  ") <> (if isSel then bold else id) (fg cText (T.take 29 r.model))
             , maybe (fg cMuted "-") (fg cText . showParams) r.params
             , maybe
                 (fg cMuted "-")
@@ -75,8 +148,8 @@ restraintCell r = case stiffness r of
 -- The panel for the selected model
 -- ===========================================================================
 
-panel :: Int -> Row -> [Text]
-panel width r =
+panel :: Bool -> Int -> Row -> [Text]
+panel inMemory width r =
   box
     boxW
     (fg (backendColour r.backend) ("● " <> r.backend) <> "  " <> bold (fg cText r.model) <> "  " <> fg (feelColour (feelOf r)) (feelName (feelOf r)))
@@ -130,7 +203,7 @@ panel width r =
       (Just d, Just (_, p)) ->
         let prompt = 60 / p
             answer = 200 / d
-         in [ bold (fg cAccent "a typical ask")
+         in [ bold (fg cAccent "a typical ask") <> (if inMemory then fg cGreen "   in memory now, so the warm figure applies" else "")
             , fg cText ("warm  " <> duration (prompt + answer))
                 <> fg cMuted ("   " <> duration prompt <> " to read the question, " <> duration answer <> " for 200 tokens")
             , case r.load of
