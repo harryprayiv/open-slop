@@ -110,18 +110,23 @@ layout cells =
     | ((_, w, right), c) <- zip columns cells
     ]
 
--- | The table. The predicate says which models are in memory right now,
--- marked with a filled dot beside the name.
-tableLines :: (Row -> Bool) -> Int -> [Row] -> Maybe Int -> [Text]
-tableLines inMemory width rows selected =
-  clip width (fg cGrey (layout [h | (h, _, _) <- columns])) : zipWith line [0 ..] rows
+-- | The table. The first predicate says which models are in memory right
+-- now, marked with a filled dot beside the name; the second which are
+-- marked for a comparison chat, shown with a + in the first column.
+--
+-- The header's model heading carries the same two-space indent as the
+-- in-memory slot in front of each name, so the headings sit over their
+-- columns.
+tableLines :: (Row -> Bool) -> (Row -> Bool) -> Int -> [Row] -> Maybe Int -> [Text]
+tableLines inMemory marked width rows selected =
+  clip width (fg cGrey (layout [if h == "model" then "  model" else h | (h, _, _) <- columns])) : zipWith line [0 ..] rows
   where
     maxDecode = maximum (1 : mapMaybe (.decode) rows)
     line i r =
       let isSel = selected == Just i
           feel = feelOf r
           cells =
-            [ if isSel then fg cAccent "▶" else " "
+            [ (if isSel then fg cAccent "▶" else " ") <> (if marked r then bold (fg cAccent "+") else " ")
             , fg (backendColour r.backend) ("● " <> r.backend)
             , (if inMemory r then fg cGreen "◉ " else fg cMuted "  ") <> (if isSel then bold else id) (fg cText (T.take 29 r.model))
             , maybe (fg cMuted "-") (fg cText . showParams) r.params

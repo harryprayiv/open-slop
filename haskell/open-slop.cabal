@@ -149,7 +149,7 @@ executable llmq-models
   hs-source-dirs:  app/llmq-models
   main-is:         Main.hs
   other-modules:
-    Ask
+    Chat
     Live
     Models
     Render
