@@ -131,6 +131,8 @@ executable llmq-bench
   import:          shared
   hs-source-dirs:  app/llmq-bench
   main-is:         Main.hs
+  other-modules:
+    Restraint
   ghc-options:     -threaded -rtsopts
   build-depends:
     open-slop,
@@ -146,6 +148,11 @@ executable llmq-models
   import:          shared
   hs-source-dirs:  app/llmq-models
   main-is:         Main.hs
+  other-modules:
+    Ask
+    Models
+    Render
+    Style
   -- threaded: the thinking indicator runs in its own thread while the
   -- answer is read from llmq's output.
   ghc-options:     -threaded
