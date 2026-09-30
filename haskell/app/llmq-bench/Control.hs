@@ -24,6 +24,17 @@
 -- commands and nothing wider (llama-server.nix's controlledBy for the
 -- first and third, a rule in the row's host configuration for the second).
 -- ssh runs with BatchMode, so a missing key fails the same way.
+--
+-- ============================================================================
+-- WHICH KEY
+-- ============================================================================
+--
+-- With $LLMQ_BENCH_SSH_KEY set, ssh uses that key file and no other
+-- (IdentitiesOnly). An unattended run on a machine nobody is logged into
+-- has no ssh agent, so it needs a key of its own; on blade that key is a
+-- sops secret, and the row only accepts it from blade's address and only
+-- for the commands above (hosts/oracle.nix in neoblade-config). Unset, ssh
+-- uses whatever the caller's agent and configuration provide.
 module Control
   ( Control (..)
   , remote
@@ -34,6 +45,7 @@ module Control
 
 import Data.Text (Text)
 import Data.Text qualified as T
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 
@@ -42,10 +54,14 @@ newtype Control = Control {target :: Text}
 -- | Run one command on the row. Left carries what went wrong.
 remote :: Control -> [Text] -> IO (Either Text Text)
 remote c args = do
+  key <- lookupEnv "LLMQ_BENCH_SSH_KEY"
+  let keyArgs = case key of
+        Just k | not (null k) -> ["-i", k, "-o", "IdentitiesOnly=yes"]
+        _ -> []
   (code, out, err) <-
     readProcessWithExitCode
       "ssh"
-      (["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", T.unpack c.target, "--"] <> map T.unpack args)
+      (["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"] <> keyArgs <> [T.unpack c.target, "--"] <> map T.unpack args)
       ""
   pure case code of
     ExitSuccess -> Right (T.strip (T.pack out))
