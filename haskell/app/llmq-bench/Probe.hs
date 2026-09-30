@@ -12,7 +12,7 @@
 -- 711 s of prefill inside a 258 s wall clock. A streamed request is timed
 -- by the client at every piece that arrives, so one request gives both:
 --
---   ttft       seconds from sending to the first piece of answer: reading
+--   ttft       seconds from sending to the first generated piece: reading
 --              the prompt, plus fixed overhead, plus one generated token
 --   decode     generated tokens after the first, over the seconds between
 --              the first piece and the last: generation alone
@@ -20,6 +20,18 @@
 -- The token count is the server's own (eval_count, predicted_n) where it
 -- gives one, and the number of pieces otherwise; every engine here sends
 -- one token per piece.
+--
+-- ============================================================================
+-- REASONING MODELS
+-- ============================================================================
+--
+-- ollama sends a reasoning model's think block in message.thinking (or
+-- thinking, on /api/generate), apart from message.content, and llama-server
+-- sends it in delta.reasoning_content. Those pieces are generated tokens
+-- like any other, so they count for ttft and decode. They are left out of
+-- the answer text, which the schema and restraint checks read. On
+-- 2026-09-30 deepseek-r1:1.5b spent all 64 tokens of every grid request
+-- thinking; counting only content gave it no first token and no timings.
 --
 -- ============================================================================
 -- THE REQUESTS
@@ -74,6 +86,9 @@ data Trial = Trial
   , promptTokens :: Maybe Int
   , completionTokens :: Maybe Int
   , text :: Text
+  -- ^ the answer, without any think block
+  , thinking :: Int
+  -- ^ how many of the pieces were think block
   }
 
 -- | Generated tokens per second after the first, from one trial. Nothing
@@ -92,34 +107,41 @@ streamAsk client limit ep b model req = do
   firstRef <- newIORef Nothing
   lastRef <- newIORef Nothing
   piecesRef <- newIORef (0 :: Int)
+  thinkingRef <- newIORef (0 :: Int)
   textRef <- newIORef []
   promptRef <- newIORef Nothing
   completionRef <- newIORef Nothing
   errRef <- newIORef Nothing
   t0 <- getMonotonicTime
-  let piece t
+  let timed = do
+        tn <- getMonotonicTime
+        modifyIORef' firstRef (maybe (Just (tn - t0)) Just)
+        writeIORef lastRef (Just (tn - t0))
+        modifyIORef' piecesRef (+ 1)
+      answer t
         | T.null t = pure ()
-        | otherwise = do
-            tn <- getMonotonicTime
-            modifyIORef' firstRef (maybe (Just (tn - t0)) Just)
-            writeIORef lastRef (Just (tn - t0))
-            modifyIORef' piecesRef (+ 1)
-            modifyIORef' textRef (t :)
+        | otherwise = timed >> modifyIORef' textRef (t :)
+      thought t
+        | T.null t = pure ()
+        | otherwise = timed >> modifyIORef' thinkingRef (+ 1)
       withJson raw k = case Aeson.decodeStrict (fromMaybe raw (B.stripPrefix "data: " raw)) of
         Just (Object o) -> case KeyMap.lookup "error" o of
           Just (String e) -> writeIORef errRef (Just e)
           Just e -> writeIORef errRef (Just (T.pack (show e)))
           Nothing -> k (Object o)
         _ -> pure ()
-      ndjson field raw = withJson raw \v -> do
-        maybe (pure ()) piece (textAt field v)
+      ndjson field thinkField raw = withJson raw \v -> do
+        maybe (pure ()) thought (textAt thinkField v)
+        maybe (pure ()) answer (textAt field v)
         mapM_ (writeIORef promptRef . Just) (intAt ["prompt_eval_count"] v)
         mapM_ (writeIORef completionRef . Just) (intAt ["eval_count"] v)
       sse raw
         | B.isPrefixOf "data: [DONE]" raw = pure ()
         | otherwise = withJson raw \v -> do
             case pathTo ["choices"] v of
-              Just (Array cs) | (c : _) <- foldr (:) [] cs -> maybe (pure ()) piece (textAt ["delta", "content"] c)
+              Just (Array cs) | (c : _) <- foldr (:) [] cs -> do
+                maybe (pure ()) thought (textAt ["delta", "reasoning_content"] c)
+                maybe (pure ()) answer (textAt ["delta", "content"] c)
               _ -> pure ()
             mapM_ (writeIORef promptRef . Just) (intAt ["timings", "prompt_n"] v)
             mapM_ (writeIORef completionRef . Just) (intAt ["timings", "predicted_n"] v)
@@ -147,7 +169,7 @@ streamAsk client limit ep b model req = do
                 ]
                   <> ["format" .= schema | req.withSchema]
               )
-          , ndjson ["message", "content"]
+          , ndjson ["message", "content"] ["message", "thinking"]
           )
         LlamaServer ->
           ( "/v1/chat/completions"
@@ -178,7 +200,7 @@ streamAsk client limit ep b model req = do
               , "stream" .= True
               , "options" .= object ["num_predict" .= req.maxTokens]
               ]
-          , ndjson ["response"]
+          , ndjson ["response"] ["thinking"]
           )
   r <- timeout (limit * 1000000) (postLines client NoAuth ep.url path body onLine)
   t1 <- getMonotonicTime
@@ -194,6 +216,7 @@ streamAsk client limit ep b model req = do
       txt <- T.concat . reverse <$> readIORef textRef
       pt <- readIORef promptRef
       ct <- readIORef completionRef
+      th <- readIORef thinkingRef
       pure
         ( Right
             Trial
@@ -206,6 +229,7 @@ streamAsk client limit ep b model req = do
               , promptTokens = pt
               , completionTokens = ct
               , text = txt
+              , thinking = th
               }
         )
 

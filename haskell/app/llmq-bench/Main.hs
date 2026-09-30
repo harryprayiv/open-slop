@@ -73,19 +73,32 @@
 -- entries, and loads are from whatever the page cache holds.
 --
 -- ============================================================================
+-- HEAT
+-- ============================================================================
+--
+-- A bare Pi 5 throttles within minutes of all-core work (Conditions has
+-- the night that showed it). Every timed request waits for an idle machine
+-- under --cool-to degrees first, so every trial starts from the same
+-- state, and every trial is labelled burst or sustained by the clock it
+-- actually ran at. Pacing costs wall-clock time, several minutes per long
+-- trial on bare cooling; with a cooler most waits end at once.
+--
+-- ============================================================================
 -- THE NUMBERS FOR A DECISION
 -- ============================================================================
 --
 -- An answer of m tokens to a prompt of k thousand tokens, on a model already
 -- in memory, takes about
 --
---   predict.ttftSeconds(k) + (m - 1) / predict.decodeTokPerSec(k)
+--   ttftSeconds(k) + (m - 1) / decodeTokPerSec(k)
 --
--- from a cold prefix cache, or reuse.ttft in place of the first term when
--- the prompt's prefix was just sent. Add load.fromDisk or load.fromMemory
--- and warmup when the model is not resident. The top-level tokPerSec, the
--- prefill rows, warmPrefillSeconds and load.seconds keep the shape llmq and
--- llmq-models already read, now as medians of repeated trials.
+-- from predict.burst for a request to an idle machine, or predict.sustained
+-- for one that follows enough work to throttle it; from a cold prefix
+-- cache, or with reuse.ttft in place of the first term when the prompt's
+-- prefix was just sent. Add load.fromDisk or load.fromMemory and warmup
+-- when the model is not resident. The top-level tokPerSec, the prefill
+-- rows, warmPrefillSeconds and load.seconds keep the shape llmq and
+-- llmq-models already read, as medians of each size's headline regime.
 module Main (main) where
 
 import Conditions (Sampler, observed, startSampler)
@@ -140,6 +153,9 @@ data Opts = Opts
   , outTokens :: Int
   , loadReps :: Int
   , budgetMinutes :: Double
+  , coolTo :: Double
+  , coolTimeout :: Double
+  , reprobe :: Bool
   }
 
 optsP :: Parser Opts
@@ -165,6 +181,9 @@ optsP =
     <*> option auto (long "out-tokens" <> metavar "N" <> value 64 <> showDefault <> help "tokens generated per grid request, which is what decode is timed over")
     <*> option auto (long "load-reps" <> metavar "N" <> value 3 <> showDefault <> help "loads per kind (from disk, from RAM)")
     <*> option auto (long "budget" <> metavar "MINUTES" <> value 60 <> showDefault <> help "per model; after min-reps, no repetition starts that would end past it")
+    <*> option auto (long "cool-to" <> metavar "CELSIUS" <> value 65 <> showDefault <> help "every timed request waits for an idle machine under this temperature")
+    <*> option auto (long "cool-timeout" <> metavar "SECS" <> value 900 <> showDefault <> help "longest wait for it before a request goes ahead anyway")
+    <*> switch (long "reprobe" <> help "ask the restraint probes again even when the same weights answered them before")
 
 main :: IO ()
 main = do
@@ -222,6 +241,8 @@ runBench o target = do
           , timeoutSecs = o.timeoutSeconds
           , control = ctl
           , fromDisk = not o.noDisk
+          , coolTo = o.coolTo
+          , coolTimeout = o.coolTimeout
           , sampler = s
           , client = client
           }
@@ -232,7 +253,7 @@ runBench o target = do
 
   -- llama-server's state before the run, restored after it.
   llamaWasUp <- case ctl of
-    Just c | not (null llamaEps), not o.pendingOnly, not o.preflight -> Just <$> isActive c "llama-server.service"
+    Just c | not (null llamaEps), not o.pendingOnly -> Just <$> isActive c "llama-server.service"
     _ -> pure Nothing
   current <- newIORef prior
   freshAll <- newIORef []
@@ -246,7 +267,7 @@ runBench o target = do
         (Just c, Just _) -> llamaServer c "stop" >>= either (\e -> say ("could not stop llama-server: " <> e)) (const (say "llama-server stopped for the other backends"))
         _ -> pure ()
       startLlama ep = case ctl of
-        Just c | not o.pendingOnly, not o.preflight -> do
+        Just c | not o.pendingOnly -> do
           -- Nothing else may hold memory while llama-server is measured.
           forM_ [e | e <- otherEps, hostOf e.url == hostOf ep.url, maybe False (\b -> b.engine == Ollama) (Map.lookup e.backend cat.backends)] (unloadAll client)
           r <- llamaServer c "start"
@@ -286,7 +307,23 @@ runBench o target = do
                               numCtx = case b.engine of
                                 Ollama -> Just (fromMaybe b.ctx (known >>= (.ctx)))
                                 _ -> Nothing
-                          r <- measureModel (cfg (samplerFor ep)) (Target ep b name numCtx (filter (/= name) names))
+                              prior' = do
+                                e <- before
+                                Object r <- pathOf ["measured", "restraint"] e
+                                day' <- case pathOf ["measured", "on"] e of
+                                  Just (String d) -> Just d
+                                  _ -> Nothing
+                                recorded <- case pathOf ["measured", "fingerprint"] e of
+                                  Just (String f) -> Just f
+                                  _ -> Nothing
+                                -- An empty answer means the probe was never really
+                                -- answered (a think block counted as nothing before
+                                -- protocol 3), so it is asked again.
+                                let answered = case KeyMap.lookup "probes" r of
+                                      Just (Array ps) -> not (null ps) && and [maybe False (not . T.null . T.strip) (textOf "answer" p) | p <- foldr (:) [] ps]
+                                      _ -> False
+                                if o.reprobe || Just recorded /= fp || not answered then Nothing else Just (Object r, day')
+                          r <- measureModel (cfg (samplerFor ep)) (Target ep b name numCtx (filter (/= name) names) prior')
                           let entry = entryFor day ep b known name fp r
                           modifyIORef' freshAll (<> [(ep.backend, catalogueKey name, entry)])
                           unless fresh' do
@@ -412,6 +449,12 @@ entryFor day ep b known name fp r =
           )
         ]
     rateLine = maybe "decode not measured" (T.pack . printf "decode %.2f tok/s (median)") r.tokPerSec
+
+textOf :: Text -> Value -> Maybe Text
+textOf k (Object obj) = case KeyMap.lookup (Key.fromText k) obj of
+  Just (String t) -> Just t
+  _ -> Nothing
+textOf _ _ = Nothing
 
 pathOf :: [Text] -> Value -> Maybe Value
 pathOf [] v = Just v

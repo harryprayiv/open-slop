@@ -7,11 +7,12 @@
 -- THE ORDER
 -- ============================================================================
 --
---   1. Wait for a quiet, cool machine (Conditions.waitQuiet).
+--   1. Wait for an idle machine under the starting temperature.
 --   2. Facts and window from the server.
---   3. Load and warmup, loadReps times. On ollama every other model is
---      unloaded first, then this one, and each repetition times the load
---      alone (an empty /api/generate), then one short request, then two
+--   3. Load and warmup, loadReps times, each starting cool. On ollama every
+--      other model is unloaded first, then this one, and each repetition
+--      times the load alone (an empty /api/generate), then at once one
+--      short request (its excess over the next two is the warmup), then two
 --      more. With --control, repetitions alternate between a load with the
 --      page cache dropped (from the SD card) and one without (from RAM).
 --      On llama-server with --control the load is a restart timed to a
@@ -19,32 +20,60 @@
 --      from another, which cannot be separated from its first request.
 --   4. The grid: a prompt of each size, answered with outTokens tokens,
 --      streamed. Sizes are visited round-robin, one repetition of each per
---      round, so slow drift in the machine spreads over every size rather
---      than landing on one. Each prompt starts with a new nonce, so no
---      prefix cache can serve it. A size stops once both its ttft and its
---      decode rate have a 95% interval within `target` of the mean, after
---      at least minReps; everything stops at maxReps or the time budget.
+--      round, and every trial waits first for an idle machine under the
+--      starting temperature (Conditions.waitCool), so every trial starts
+--      from the same state. Each prompt starts with a new nonce, so no
+--      prefix cache can serve it.
 --   5. Reuse: the largest prompt sent once to fill the cache, then again
---      with a different short question on the end each time. This is the
---      pattern of many questions over one bundle, and its ttft against the
---      cold ttft at the same size is what the cache is worth.
+--      with a different short question on the end each time, each paced
+--      like the grid. This is the pattern of many questions over one
+--      bundle, and its ttft against the cold ttft at the same size is what
+--      the cache is worth.
 --   6. Schema: whether a JSON Schema request comes back in the schema.
 --   7. Restraint: the eight probes, once each; temperature 0 makes them
---      deterministic, so repeating them adds nothing.
+--      deterministic, so repeating them adds nothing, and when the served
+--      model is the one measured before (same fingerprint) the earlier
+--      answers are carried over unless --reprobe is given.
+--
+-- ============================================================================
+-- REGIMES, AND WHEN A SIZE IS DONE
+-- ============================================================================
+--
+-- Each trial is burst, sustained or contended by what the machine did
+-- while it ran (Conditions). A size is done when it has minReps burst
+-- trials whose ttft and decode rate both have a 95% interval within
+-- `target` of the mean; or, when none of its trials ran unthrottled (a
+-- long prompt on bare cooling heats the Pi into throttling by itself),
+-- when it has minReps sustained trials that are that precise. Otherwise it repeats
+-- to maxReps or the time budget. Contended trials never count.
+--
+-- A size's headline figure is its burst figure when it has minReps burst
+-- trials, else its sustained figure, and its row says which. Both figures
+-- are reported when both exist, with every trial's own clock, temperature
+-- and wait, so nothing about how a number was taken is left out.
 --
 -- ============================================================================
 -- WHAT COMES OUT, FOR DECISIONS
 -- ============================================================================
 --
---   predict.ttft     ttft = a + b*k + c*k^2 with k the prompt in thousands of
---                    tokens, fitted over every clean grid trial. The time to
---                    the first word of an answer to a prompt of any size in
---                    the measured range.
---   predict.decode   decode rate = d0 + d1*k: how generation slows as the
---                    context fills.
+--   predict.burst      ttft = a + b*k + c*k^2 and decode = d0 + d1*k, k the
+--                      prompt in thousands of tokens, fitted over burst
+--                      trials: a request to an idle machine.
+--   predict.sustained  the same over sustained trials: a request after the
+--                      machine has been working long enough to throttle.
 --   A whole answer of m tokens to a k-thousand-token prompt then takes about
 --   ttft(k) + (m - 1) / decode(k), from a cold cache. With the prompt's
 --   prefix cached, use reuse.ttft in place of ttft(k).
+--
+-- ============================================================================
+-- PROBLEMS AND OBSERVATIONS
+-- ============================================================================
+--
+-- `problems` are failures of the measurement: a request that failed, a
+-- prompt the server cut short. They make the entry due for measuring again.
+-- `observations` are how the model behaved: stopping early at some prompt
+-- size, as qwen2.5:3b did at 4,000 tokens on 2026-09-30. They are facts
+-- about the model, and measuring again would find them again.
 module Protocol
   ( Config (..)
   , Target (..)
@@ -92,6 +121,9 @@ data Config = Config
   , timeoutSecs :: Int
   , control :: Maybe Control
   , fromDisk :: Bool
+  , coolTo :: Double
+  -- ^ every timed request waits for the machine to be under this, in C
+  , coolTimeout :: Double
   , sampler :: Maybe Sampler
   , client :: Client
   }
@@ -105,6 +137,9 @@ data Target = Target
   -- ^ ollama's num_ctx: the window llmq uses for this model
   , others :: [Text]
   -- ^ other models on the same endpoint, for switching away on hailo
+  , priorRestraint :: Maybe (Value, Text)
+  -- ^ restraint results from an earlier measurement of the same weights,
+  -- and the day they were taken
   }
 
 data Result = Result
@@ -115,21 +150,27 @@ data Result = Result
 -- | A trial with what the machine was doing while it ran.
 data Judged = Judged
   { trial :: Trial
-  , suspect :: [Text]
+  , verdict :: Verdict
+  , waited :: Double
+  , startTemp :: Maybe Double
   }
+
+regimeOf :: Judged -> Regime
+regimeOf j = j.verdict.regime
 
 measureModel :: Config -> Target -> IO Result
 measureModel cfg tg = do
   tStart <- now
   problemsRef <- newIORef []
+  earlyRef <- newIORef (Map.empty :: Map.Map Int [Int])
   let problem t = say ("  PROBLEM " <> t) >> modifyIORef' problemsRef (<> [t])
       eng = tg.backend.engine
 
-  -- 1. quiet
-  (waited, quiet) <- case cfg.sampler of
-    Nothing -> threadDelay 30000000 >> pure (30, False)
-    Just s -> waitQuiet s 65 900
-  say (T.pack (printf "  waited %.0f s for a quiet machine%s" waited (if quiet then "" else " and gave up" :: String)))
+  -- 1. idle and cool
+  (waitedStart, quiet, _) <- case cfg.sampler of
+    Nothing -> threadDelay 30000000 >> pure (30, False, Nothing)
+    Just s -> waitQuiet s cfg.coolTo cfg.coolTimeout
+  say (T.pack (printf "  waited %.0f s for an idle machine under %.0f C%s" waitedStart cfg.coolTo (if quiet then "" else ", and gave up" :: String)))
 
   -- 2. facts and window
   facts <- factsOf cfg.client tg
@@ -145,7 +186,11 @@ measureModel cfg tg = do
         , eng /= HailoOllama || s <= 1024
         ]
       short = Request "Reply with the word ok." 1 False tg.numCtx
-      judged req = timedJudged cfg tg req
+      paced = timed cfg tg True
+      immediate = timed cfg tg False
+      cool = case cfg.sampler of
+        Just s -> () <$ waitCool s cfg.coolTo cfg.coolTimeout
+        Nothing -> pure ()
 
   -- 3. load and warmup
   loadMem <- newIORef []
@@ -155,9 +200,9 @@ measureModel cfg tg = do
   warmups <- newIORef []
   overheads <- newIORef []
   let firstAndSteady afterLoad = do
-        f <- judged short
-        s1 <- judged short
-        s2 <- judged short
+        f <- immediate short
+        s1 <- immediate short
+        s2 <- immediate short
         case (f, s1, s2) of
           (Right a, Right b, Right c) -> do
             let steady = [b.trial.total, c.trial.total]
@@ -171,6 +216,7 @@ measureModel cfg tg = do
       diskOk <- newIORef True
       forM_ [1 .. cfg.loadReps] \_ -> forM_ modes \disk -> do
         unloadAll cfg.client tg.ep
+        cool
         dropped <-
           if disk
             then case cfg.control of
@@ -196,6 +242,7 @@ measureModel cfg tg = do
               pure ()
     LlamaServer -> case cfg.control of
       Just c -> forM_ [1 .. cfg.loadReps] \_ -> do
+        cool
         t0 <- now
         llamaServer c "restart" >>= \case
           Left e -> problem ("llama-server restart failed: " <> e)
@@ -205,47 +252,42 @@ measureModel cfg tg = do
             if ok
               then modifyIORef' serverStart (<> [t1 - t0]) >> firstAndSteady True >> pure ()
               else problem "llama-server did not become healthy within 600 s of a restart"
-      Nothing -> forM_ [1 .. cfg.loadReps] \_ -> firstAndSteady False
+      Nothing -> forM_ [1 .. cfg.loadReps] \_ -> cool >> firstAndSteady False
     HailoOllama -> forM_ [1 .. cfg.loadReps] \_ -> do
       case tg.others of
         (o : _) -> do
           _ <- streamAsk cfg.client cfg.timeoutSecs tg.ep tg.backend o short
+          cool
           r <- firstAndSteady True
           forM_ r \(first, steady) -> forM_ steady \m -> modifyIORef' combined (<> [first - m])
-        [] -> () <$ firstAndSteady False
+        [] -> cool >> () <$ firstAndSteady False
 
   -- 4. the grid
   tGrid <- now
   let deadline = tStart + cfg.budgetSecs
   grid <- newIORef (Map.fromList [(s, []) | s <- sizesOk])
   counter <- newIORef (0 :: Int)
-  -- Converged counts clean trials only, so a size with suspect trials
-  -- keeps being repeated until it has minReps clean ones or runs out of
-  -- repetitions; only the final figures fall back to suspect trials.
-  let converged s = do
-        ts <- Map.findWithDefault [] s <$> readIORef grid
-        let clean = [j | j <- ts, null j.suspect]
-            ttfts = mapMaybe (.trial.ttft) clean
-            rates = mapMaybe (decodeRate . (.trial)) clean
-            ok xs = maybe False (<= cfg.target) (relHalfWidth xs)
-        pure (length clean >= cfg.minReps && ok ttfts && (null rates || ok rates))
+  let done' s = sizeDone cfg . Map.findWithDefault [] s <$> readIORef grid
       round' rep = do
-        pending <- filterM' (fmap not . converged) sizesOk
+        pending <- filterM' (fmap not . done') sizesOk
         forM_ pending \s -> do
           ts <- Map.findWithDefault [] s <$> readIORef grid
           t <- now
-          let expected = fromMaybe 0 (median (map (.trial.total) ts))
+          let expected = fromMaybe 0 (median (map (\j -> j.trial.total + j.waited) ts))
           if rep > cfg.minReps && t + expected > deadline
             then pure ()
             else do
               k <- atomicModifyIORef' counter (\c -> (c + 1, c + 1))
-              r <- judged (Request (filler tg.backend s ("grid " <> T.pack (show k) <> " " <> T.pack (show t))) cfg.outTokens False tg.numCtx)
+              r <- paced (Request (filler tg.backend s ("grid " <> T.pack (show k) <> " " <> T.pack (show t))) cfg.outTokens False tg.numCtx)
               case r of
                 Left e -> problem (T.pack (show s) <> "-token prompt: " <> e)
                 Right j -> do
                   forM_ j.trial.promptTokens \pt ->
                     when (fromIntegral pt < 0.8 * (fromIntegral s :: Double)) $
                       problem (T.pack (printf "%d-token prompt: the server read only %d tokens of it" s pt))
+                  let got = fromMaybe j.trial.pieces j.trial.completionTokens
+                  when (got < cfg.outTokens `div` 2) $
+                    modifyIORef' earlyRef (Map.insertWith (flip (<>)) s [got])
                   modifyIORef' grid (Map.insertWith (flip (<>)) s [j])
                   sayTrial s j
         pure (not (null pending))
@@ -259,24 +301,25 @@ measureModel cfg tg = do
   gridDone <- readIORef grid
 
   -- 5. reuse
-  reuseTtfts <- newIORef []
+  reuseRef <- newIORef []
   case reverse sizesOk of
     [] -> pure ()
     (big : _) -> do
       bundleNonce <- now
       let bundle = fillerBody tg.backend big ("bundle " <> T.pack (show bundleNonce))
-          ask i = judged (Request (bundle <> "\n\nQuestion " <> T.pack (show (i :: Int)) <> ": reply with the word ok.") 1 False tg.numCtx)
+          ask i = paced (Request (bundle <> "\n\nQuestion " <> T.pack (show (i :: Int)) <> ": reply with the word ok.") 1 False tg.numCtx)
       _ <- ask 0
       let loop i
             | i > cfg.maxReps = pure ()
             | otherwise = do
-                xs <- readIORef reuseTtfts
+                js <- readIORef reuseRef
                 t <- now
-                let done' = i > cfg.minReps && (maybe False (<= cfg.target) (relHalfWidth xs) || t >= deadline + 600)
-                unless done' do
+                let xs = mapMaybe (.trial.ttft) [j | j <- js, regimeOf j /= Contended]
+                    finished = i > cfg.minReps && (maybe False (<= cfg.target) (relHalfWidth xs) || t >= deadline + 600)
+                unless finished do
                   ask i >>= \case
                     Left e -> problem ("reuse: " <> e)
-                    Right j -> forM_ j.trial.ttft \v -> modifyIORef' reuseTtfts (<> [v])
+                    Right j -> modifyIORef' reuseRef (<> [j])
                   loop (i + 1)
       loop 1
 
@@ -292,76 +335,105 @@ measureModel cfg tg = do
             _ -> "ignored: the answer did not match the schema"
 
   -- 7. restraint
-  probeResults <-
-    if not cfg.probes
-      then pure []
-      else forM restraintProbes \(probeName, prompt) ->
-        streamAsk cfg.client cfg.timeoutSecs tg.ep tg.backend tg.name (Request prompt 120 False tg.numCtx) <&&> \case
+  restraint <- case (cfg.probes, tg.priorRestraint) of
+    (False, _) -> pure Null
+    (True, Just (Object prior, day)) -> do
+      say ("  restraint carried over from " <> day <> ": the same weights answer deterministically")
+      pure (Object (KeyMap.insert "carriedFrom" (String day) prior))
+    (True, _) -> do
+      -- 120 tokens is enough for any answer's opening, which is all the
+      -- verdict reads. A reasoning model can spend all of it thinking and
+      -- give no answer, so that one probe is asked again with room for the
+      -- think block and the answer after it.
+      let probe prompt budget = streamAsk cfg.client cfg.timeoutSecs tg.ep tg.backend tg.name (Request prompt budget False tg.numCtx)
+      results <- forM restraintProbes \(probeName, prompt) -> do
+        first <- probe prompt 120
+        r <- case first of
+          Right t | T.null (T.strip t.text), t.thinking > 0 -> probe prompt 1024
+          _ -> pure first
+        pure case r of
           Left e -> (probeName, False, 0, "no answer: " <> T.take 120 e)
           Right t -> (probeName, refuses probeName t.text, t.total, T.take 300 (T.strip t.text))
+      pure
+        ( object
+            [ "asked" .= length results
+            , "refused" .= length [() | (_, True, _, _) <- results]
+            , "refusedWhich" .= [p | (p, True, _, _) <- results]
+            , "probes" .= [object ["probe" .= p, "refused" .= r, "seconds" .= r2 secs, "answer" .= a] | (p, r, secs, a) <- results]
+            ]
+        )
 
   tEnd <- now
   everything <- maybe (pure []) (\s -> samplesBetween s tStart tEnd) cfg.sampler
   seen <- maybe (pure False) observed cfg.sampler
   problems <- readIORef problemsRef
+  early <- readIORef earlyRef
   lm <- readIORef loadMem
   ld <- readIORef loadDisk
   ss <- readIORef serverStart
   cb <- readIORef combined
   wu <- readIORef warmups
   oh <- readIORef overheads
-  ru <- readIORef reuseTtfts
+  ru <- readIORef reuseRef
 
   let overheadMed = fromMaybe 0 (median oh)
-      perSize =
-        [ (s, clean, length js - length clean)
-        | (s, js) <- Map.toList gridDone
-        , let clean = usable cfg js
-        ]
-      promptTokOf s clean = case mapMaybe (.trial.promptTokens) clean of
+      allGrid = concat (Map.elems gridDone)
+      promptTokOf s js = case mapMaybe (.trial.promptTokens) js of
         [] -> (s, True)
         xs -> (round (fromMaybe (fromIntegral s) (median (map fromIntegral xs)) :: Double), False)
+      ttftsOf = mapMaybe (.trial.ttft)
+      ratesOf = mapMaybe (decodeRate . (.trial))
+      pairJSON js =
+        if null js
+          then Null
+          else object ["trials" .= length js, "ttft" .= fmap summaryJSON (summarise (ttftsOf js)), "decodeTokPerSec" .= fmap summaryJSON (summarise (ratesOf js))]
+      rows =
+        [ (s, reg, hs, js)
+        | (s, js) <- Map.toList gridDone
+        , let (reg, hs) = headline cfg js
+        ]
       prefillRows =
         [ object
             [ "promptTokens" .= pt
             , "tokensEstimated" .= est
+            , "regime" .= reg
             , "seconds" .= r2 m
             , "tokPerSec" .= r2 (fromIntegral pt / max 0.01 (m - overheadMed))
             , "ttft" .= summaryJSON sm
-            , "excludedTrials" .= excluded
+            , "burst" .= pairJSON [j | j <- js, regimeOf j == Burst]
+            , "sustained" .= pairJSON [j | j <- js, regimeOf j == Sustained]
+            , "contendedTrials" .= length [() | j <- js, regimeOf j == Contended]
+            , "trials" .= map trialJSON js
             ]
-        | (s, clean, excluded) <- perSize
-        , Just sm <- [summarise (mapMaybe (.trial.ttft) clean)]
+        | (s, reg, hs, js) <- rows
+        , Just sm <- [summarise (ttftsOf hs)]
         , let m = sm.median'
-        , let (pt, est) = promptTokOf s clean
+        , let (pt, est) = promptTokOf s js
         ]
       byDepth =
-        [ (pt, sm)
-        | (s, clean, _) <- perSize
-        , Just sm <- [summarise (mapMaybe (decodeRate . (.trial)) clean)]
-        , let (pt, _) = promptTokOf s clean
+        [ (pt, reg, sm)
+        | (s, reg, hs, js) <- rows
+        , Just sm <- [summarise (ratesOf hs)]
+        , let (pt, _) = promptTokOf s js
         ]
-      shallowDecode = (.median') . snd <$> listToMaybe (sortOn fst byDepth)
-      ttftPoints =
-        [ (fromIntegral (fromMaybe s j.trial.promptTokens) / 1000, t)
-        | (s, clean, _) <- perSize
-        , j <- clean
-        , Just t <- [j.trial.ttft]
-        ]
-      decodePoints =
-        [ (fromIntegral (fromMaybe s j.trial.promptTokens) / 1000, r)
-        | (s, clean, _) <- perSize
-        , j <- clean
-        , Just r <- [decodeRate j.trial]
-        ]
-      ttftFit = case fitPoly 2 ttftPoints of
-        Just f | length ttftPoints >= 4 -> Just ("a + b*k + c*k^2, k = prompt tokens / 1000" :: Text, f)
-        _ -> ("a + b*k, k = prompt tokens / 1000",) <$> fitPoly 1 ttftPoints
-      decodeFit = ("d0 + d1*k, k = prompt tokens / 1000" :: Text,) <$> fitPoly 1 decodePoints
-      coldAtBig = case reverse perSize of
-        ((_, clean, _) : _) -> median (mapMaybe (.trial.ttft) clean)
-        [] -> Nothing
-      suspects = sum [ex | (_, _, ex) <- perSize]
+      shallowDecode = (\(_, _, sm) -> sm.median') <$> listToMaybe (sortOn (\(pt, _, _) -> pt) byDepth)
+      fitsFor reg =
+        let js = [j | j <- allGrid, regimeOf j == reg]
+            kOf j = fromIntegral (fromMaybe 0 j.trial.promptTokens) / 1000
+            ttftPts = [(kOf j, t) | j <- js, Just t <- [j.trial.ttft], isJust j.trial.promptTokens]
+            ratePts = [(kOf j, r) | j <- js, Just r <- [decodeRate j.trial], isJust j.trial.promptTokens]
+            ttftFit = case fitPoly 2 ttftPts of
+              Just f | length ttftPts >= 4 -> Just ("a + b*k + c*k^2, k = prompt tokens / 1000" :: Text, f)
+              _ -> ("a + b*k, k = prompt tokens / 1000",) <$> fitPoly 1 ttftPts
+            rateFit = ("d0 + d1*k, k = prompt tokens / 1000" :: Text,) <$> fitPoly 1 ratePts
+            asJSON = fmap (\(form, f) -> object ["form" .= form, "fit" .= fitJSON f])
+         in if null js
+              then Null
+              else object ["ttftSeconds" .= asJSON ttftFit, "decodeTokPerSec" .= asJSON rateFit, "trials" .= length js]
+      bigRow = listToMaybe (reverse rows)
+      coldAtBig = bigRow >>= \(_, _, hs, _) -> median (ttftsOf hs)
+      reuseClean = [j | j <- ru, regimeOf j /= Contended]
+      countRegime r = length [() | j <- allGrid <> ru, regimeOf j == r]
       loadHeadline = case (median lm, median ss, median cb) of
         (Just m, _, _) -> Just m
         (_, Just s, _) -> Just s
@@ -372,26 +444,35 @@ measureModel cfg tg = do
         Ollama -> "every other model unloaded, then an empty /api/generate timed until the model is resident" <> (if null ld then "; the page cache was not dropped, so these are loads from RAM" else "; fromDisk after dropping the page cache, fromMemory without")
         LlamaServer -> if null ss then "llama-server loads at start and --control was not given, so its start was not timed" else "systemctl restart timed until /health answers ok"
         HailoOllama -> if null cb then "no other hailo model to switch from, so not measured" else "switched from another model, then the first request's time over the steady request time: load and warmup together"
+      observations =
+        [ T.pack (printf "%d-token prompt: stopped early in %d of %d trials, after %s of %d tokens" s (length ns) (length (Map.findWithDefault [] s gridDone)) (T.unpack (T.intercalate ", " (map (T.pack . show) ns))) cfg.outTokens)
+        | (s, ns) <- Map.toList early
+        ]
       conditions =
         object
           [ "observed" .= seen
-          , "waitedForQuietSeconds" .= r2 waited
-          , "quietAtStart" .= quiet
-          , "suspectTrialsExcluded" .= suspects
+          , "coolToC" .= cfg.coolTo
+          , "waitedForIdleAtStartSeconds" .= r2 waitedStart
+          , "idleAtStart" .= quiet
+          , "waitedBetweenTrialsSeconds" .= r2 (sum [j.waited | j <- allGrid <> ru])
+          , "trials" .= object ["burst" .= countRegime Burst, "sustained" .= countRegime Sustained, "contended" .= countRegime Contended]
           , "whole" .= summaryOf everything
           ]
       sm' = fmap summaryJSON . summarise
   say
     ( T.pack
         ( printf
-            "  decode %s tok/s, load %s s, %d grid trials, %d set aside as suspect, %.0f min"
+            "  decode %s tok/s, load %s s, %d grid trials (%d burst, %d sustained, %d contended), %.0f min"
             (maybe "-" (printf "%.2f") shallowDecode :: String)
             (maybe "-" (printf "%.1f") loadHeadline :: String)
-            (sum [length js | js <- Map.elems gridDone])
-            suspects
+            (length allGrid)
+            (length [() | j <- allGrid, regimeOf j == Burst])
+            (length [() | j <- allGrid, regimeOf j == Sustained])
+            (length [() | j <- allGrid, regimeOf j == Contended])
             ((tEnd - tStart) / 60)
         )
     )
+  forM_ observations \o -> say ("  observed: " <> o)
   when (tGrid - tStart > cfg.budgetSecs) (problem "the load measurements alone used the whole time budget")
   pure
     Result
@@ -410,6 +491,7 @@ measureModel cfg tg = do
                 , "outTokens" .= cfg.outTokens
                 , "loadReps" .= cfg.loadReps
                 , "budgetMinutes" .= (cfg.budgetSecs / 60)
+                , "coolToC" .= cfg.coolTo
                 ]
             )
           , ( "load"
@@ -429,75 +511,108 @@ measureModel cfg tg = do
             , object
                 [ "tokens" .= cfg.outTokens
                 , "tokPerSec" .= fmap r2 shallowDecode
-                , "byDepth" .= [object ["promptTokens" .= pt, "tokPerSec" .= summaryJSON s] | (pt, s) <- sortOn fst byDepth]
+                , "byDepth" .= [object ["promptTokens" .= pt, "regime" .= reg, "tokPerSec" .= summaryJSON s] | (pt, reg, s) <- sortOn (\(pt, _, _) -> pt) byDepth]
                 ]
             )
-          , ( "predict"
-            , object
-                [ "ttftSeconds" .= fmap (\(form, f) -> object ["form" .= form, "fit" .= fitJSON f]) ttftFit
-                , "decodeTokPerSec" .= fmap (\(form, f) -> object ["form" .= form, "fit" .= fitJSON f]) decodeFit
-                ]
-            )
+          , ("predict", object ["burst" .= fitsFor Burst, "sustained" .= fitsFor Sustained])
           , ( "reuse"
             , object
                 [ "bundleTokens" .= listToMaybe (reverse sizesOk)
-                , "ttft" .= sm' ru
+                , "ttft" .= sm' (ttftsOf reuseClean)
                 , "coldTtft" .= fmap r2 coldAtBig
-                , "speedup" .= (r2 <$> ((/) <$> coldAtBig <*> median ru))
+                , "coldRegime" .= fmap (\(_, reg, _, _) -> reg) bigRow
+                , "speedup" .= (r2 <$> ((/) <$> coldAtBig <*> median (ttftsOf reuseClean)))
+                , "trials" .= map trialJSON ru
                 ]
             )
-          , ("warmPrefillSeconds", toJSON (r2 <$> median ru))
+          , ("warmPrefillSeconds", toJSON (r2 <$> median (ttftsOf reuseClean)))
           , ("schema", toJSON schemaVerdict)
           , ("problems", toJSON problems)
+          , ("observations", toJSON observations)
           , ("facts", Object (KeyMap.fromList [(Key.fromText k, v) | (k, v) <- facts]))
-          , ( "restraint"
-            , if null probeResults
-                then Null
-                else
-                  object
-                    [ "asked" .= length probeResults
-                    , "refused" .= length [() | (_, True, _, _) <- probeResults]
-                    , "refusedWhich" .= [p | (p, True, _, _) <- probeResults]
-                    , "probes" .= [object ["probe" .= p, "refused" .= r, "seconds" .= r2 secs, "answer" .= a] | (p, r, secs, a) <- probeResults]
-                    ]
-            )
+          , ("restraint", restraint)
           , ("conditions", conditions)
           , ("durationSeconds", toJSON (r2 (tEnd - tStart)))
           ]
       }
   where
-    (<&&>) = flip fmap
     filterM' p = fmap catMaybes . mapM (\x -> (\ok -> if ok then Just x else Nothing) <$> p x)
 
--- | The clean trials, when there are at least minReps of them; otherwise
--- all of them. The output records how many were suspect, so a figure built
--- from them is marked as such.
-usable :: Config -> [Judged] -> [Judged]
-usable cfg js =
-  let clean = [j | j <- js, null j.suspect]
-   in if length clean >= cfg.minReps then clean else js
+-- | Whether a size has what it needs: minReps precise burst trials, or,
+-- when it produced no burst trial at all, minReps precise sustained ones.
+sizeDone :: Config -> [Judged] -> Bool
+sizeDone cfg js =
+  let b = [j | j <- js, regimeOf j == Burst]
+      s = [j | j <- js, regimeOf j == Sustained]
+      precise xs = maybe False (<= cfg.target) (relHalfWidth xs)
+      enough xs =
+        length xs >= cfg.minReps
+          && precise (mapMaybe (.trial.ttft) xs)
+          && (let rs = mapMaybe (decodeRate . (.trial)) xs in null rs || precise rs)
+   in enough b || (null b && enough s)
 
-timedJudged :: Config -> Target -> Request -> IO (Either Text Judged)
-timedJudged cfg tg req = do
+-- | The trials a size's headline figure comes from, and their regime.
+headline :: Config -> [Judged] -> (Text, [Judged])
+headline cfg js
+  | length b >= cfg.minReps = ("burst", b)
+  | length s >= cfg.minReps = ("sustained", s)
+  | not (null b) = ("burst", b)
+  | not (null s) = ("sustained", s)
+  | otherwise = ("contended", js)
+  where
+    b = [j | j <- js, regimeOf j == Burst]
+    s = [j | j <- js, regimeOf j == Sustained]
+
+trialJSON :: Judged -> Value
+trialJSON j =
+  object
+    [ "promptTokens" .= j.trial.promptTokens
+    , "ttft" .= fmap r2 j.trial.ttft
+    , "decodeTokPerSec" .= fmap r2 (decodeRate j.trial)
+    , "tokens" .= fromMaybe j.trial.pieces j.trial.completionTokens
+    , "seconds" .= r2 j.trial.total
+    , "regime" .= regimeName j.verdict.regime
+    , "meanClock" .= fmap r2 j.verdict.meanClock
+    , "maxTempC" .= fmap r2 j.verdict.maxTemp
+    , "startTempC" .= fmap r2 j.startTemp
+    , "waitedSeconds" .= r2 j.waited
+    , "samples" .= j.verdict.sampleCount
+    ]
+
+-- | One timed request. Paced, it first waits for an idle machine under the
+-- starting temperature; immediate, it does not, which is right only for
+-- requests whose point is to follow another at once (warmup, steady state).
+timed :: Config -> Target -> Bool -> Request -> IO (Either Text Judged)
+timed cfg tg pace req = do
+  (w, temp) <- case (pace, cfg.sampler) of
+    (True, Just s) -> waitCool s cfg.coolTo cfg.coolTimeout
+    _ -> pure (0, Nothing)
   r <- streamAsk cfg.client cfg.timeoutSecs tg.ep tg.backend tg.name req
   case r of
     Left e -> pure (Left e)
     Right t -> do
-      ss <- maybe (pure []) (\s -> samplesBetween s t.started t.ended) cfg.sampler
-      let v = judge ss
-          why = ["contended" | v.contended] <> ["throttled" | v.throttled]
-      pure (Right (Judged t why))
+      -- A request shorter than the two-second sampling interval may hold no
+      -- sample of its own; the one taken just before it describes it.
+      ss <- case cfg.sampler of
+        Nothing -> pure []
+        Just s -> do
+          inside <- samplesBetween s t.started t.ended
+          if null inside then samplesBetween s (t.started - 4) t.ended else pure inside
+      pure (Right (Judged t (judge ss) w temp))
 
 sayTrial :: Int -> Judged -> IO ()
 sayTrial s j =
   say
     ( T.pack
         ( printf
-            "  %5d tokens: ttft %s s, decode %s tok/s%s"
+            "  %5d tokens: ttft %s s, decode %s tok/s, %s (clock %s, %s C, waited %.0f s)"
             (fromMaybe s j.trial.promptTokens)
             (maybe "-" (printf "%.2f") j.trial.ttft :: String)
             (maybe "-" (printf "%.2f") (decodeRate j.trial) :: String)
-            (if null j.suspect then "" else "  SUSPECT: " <> T.unpack (T.intercalate ", " j.suspect))
+            (T.unpack (regimeName j.verdict.regime))
+            (maybe "-" (printf "%.0f%%" . (* 100)) j.verdict.meanClock :: String)
+            (maybe "-" (printf "%.0f") j.verdict.maxTemp :: String)
+            j.waited
         )
     )
 

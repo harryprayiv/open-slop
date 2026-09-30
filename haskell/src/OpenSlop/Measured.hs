@@ -160,11 +160,15 @@ loadCatalogue path =
 
 -- | The version of llmq-bench's measurement protocol. Bumped whenever what
 -- is measured, or how, changes, so every entry from before is measured
--- again. 1 was a single sample of each figure; 2 repeats every figure to a
--- confidence target, streams every request, and records the machine's
--- conditions.
+-- again. 1 was a single sample of each figure. 2 repeated every figure to a
+-- confidence target, streamed every request, and recorded the machine's
+-- conditions, but judged throttling by the median clock and let the first
+-- round start cooler than the rest. 3 paces every timed request to an idle
+-- machine under a starting temperature, judges throttling by the mean
+-- clock, reports burst and sustained figures apart, and counts a reasoning
+-- model's think block.
 currentProtocol :: Int
-currentProtocol = 2
+currentProtocol = 3
 
 -- | What counts as stale.
 data Policy = Policy
