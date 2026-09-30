@@ -37,6 +37,7 @@ module OpenSlop.Measured
   , overlay
   , loadCatalogueValue
   , loadCatalogue
+  , currentProtocol
   , Policy (..)
   , defaultPolicy
   , Decision (..)
@@ -157,6 +158,14 @@ loadCatalogue path =
       Aeson.Success c -> Right (c, notes)
       Aeson.Error e -> Left (path <> ": " <> e)
 
+-- | The version of llmq-bench's measurement protocol. Bumped whenever what
+-- is measured, or how, changes, so every entry from before is measured
+-- again. 1 was a single sample of each figure; 2 repeats every figure to a
+-- confidence target, streams every request, and records the machine's
+-- conditions.
+currentProtocol :: Int
+currentProtocol = 2
+
 -- | What counts as stale.
 data Policy = Policy
   { maxAgeDays :: Integer
@@ -172,10 +181,11 @@ defaultPolicy = Policy {maxAgeDays = 30, wantProbes = True, everything = False}
 data Decision = Measure Text | Keep Text
   deriving stock (Eq, Show)
 
--- | A model is measured when it has no entry, when the served model's
--- fingerprint differs from the one recorded, when the last run recorded
--- problems, when restraint results are wanted and missing, or when the
--- entry is older than the policy allows.
+-- | A model is measured when it has no entry, when its entry comes from an
+-- older protocol, when the served model's fingerprint differs from the one
+-- recorded, when the last run recorded problems, when restraint results
+-- are wanted and missing, or when the entry is older than the policy
+-- allows.
 --
 -- An entry written before fingerprints were recorded has none, and then
 -- only its age decides: treating the missing fingerprint as a change would
@@ -186,6 +196,8 @@ decide p today fp before
   | otherwise = case before of
       Nothing -> Measure "never measured"
       Just e
+        | maybe True (< currentProtocol) (pathTo ["measured", "protocol", "version"] e >>= fromValue @Int) ->
+            Measure "measured with an older protocol"
         | hadProblems e -> Measure "the last run recorded problems"
         | Just recorded <- textAt ["measured", "fingerprint"] e, Just recorded /= fp -> Measure "the served model changed"
         | p.wantProbes && pathTo ["measured", "restraint"] e `elem` [Nothing, Just Null] -> Measure "no restraint results"

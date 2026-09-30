@@ -180,17 +180,18 @@ pendingText ps =
   [T.pack (show (length ps)) <> " served " <> (if length ps == 1 then "model needs" else "models need") <> " measuring:", ""]
     <> ["  " <> p.endpoint <> "/" <> p.model <> "   " <> p.reason | p <- ps]
     <> [ ""
-       , "Nothing is measured until you run it. Overnight, with llama-server stopped:"
+       , "Nothing is measured until you run it. One command covers every backend unattended,"
+       , "overnight, where USER@HOST may switch llama-server and drop the page cache on the row."
+       , "Check that first:"
        , ""
-       , "  systemd-run --user --unit=llmq-bench-night \"$(command -v llmq-bench)\""
+       , "  llmq-bench --preflight --control USER@HOST"
        , ""
-       , "and for the llamacpp backend, with llama-server running:"
+       , "then start it:"
        , ""
-       , "  systemd-run --user --unit=llmq-bench-llamacpp \"$(command -v llmq-bench)\" --only llamacpp"
+       , "  systemd-run --user --unit=llmq-bench-night --setenv=SSH_AUTH_SOCK=\"$SSH_AUTH_SOCK\" \"$(command -v llmq-bench)\" --control USER@HOST"
        , ""
-       , "The full path, because a user unit's PATH may not include your profile."
-       , "Results go to the measurements file in this machine's cache; the next"
-       , "llmq-models started shows them."
+       , "Results go to the measurements file in this machine's cache after each model; the"
+       , "next llmq-models started shows them."
        ]
 
 -- | What the interactive screens share: the latest picture of the row, and

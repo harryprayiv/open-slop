@@ -133,7 +133,12 @@ executable llmq-bench
   hs-source-dirs:  app/llmq-bench
   main-is:         Main.hs
   other-modules:
+    Conditions
+    Control
+    Probe
+    Protocol
     Restraint
+    Stats
   ghc-options:     -threaded -rtsopts
   build-depends:
     open-slop,
@@ -141,9 +146,11 @@ executable llmq-bench
     bytestring,
     containers,
     optparse-applicative,
+    process,
     scientific,
     text,
-    time
+    time,
+    unix
 
 executable llmq-models
   import:          shared

@@ -1,70 +1,38 @@
--- | llmq-bench: measure every model every endpoint serves, and write the
--- result as catalogue data.
+-- | llmq-bench: measure every model the fleet serves, thoroughly enough
+-- that the numbers can decide which model does which job.
 --
 -- ============================================================================
--- WHY THIS EXISTS
+-- WHAT IT ANSWERS
 -- ============================================================================
 --
--- Adding a model used to mean hand-writing a catalogue entry, and the
--- numbers in it were whatever someone measured once, on whatever prompt
--- they had. This runs the same fixed probes against every served model and
--- keeps the results beside the catalogue rather than in it, so a new model
--- gets numbers by being measured rather than by anyone editing a file.
---
--- It needs no configuration: the endpoints come from the catalogue llmq
--- already reads ($OPEN_SLOP_CATALOGUE, which Nix writes with the consumer's
--- endpoints in it), and the models come from each server's own listing.
+-- For each model: how long it takes to become usable (load, from the SD
+-- card and from RAM, and the first-request warmup after it), how long
+-- before the first word of an answer for a prompt of a given size, how fast
+-- it writes once it has started and how that slows as the context fills,
+-- what a cached prefix is worth, whether it honours a JSON Schema, and how
+-- readily it refuses. Every timed figure is repeated until its 95%
+-- confidence interval is within 5% of its mean or a repetition limit is
+-- reached, and every figure carries its raw samples, so anyone can
+-- recompute it. Protocol has the order of operations; Stats
+-- has the statistics; Probe has how a request is timed; Conditions has how
+-- the machine is watched while it is measured.
 --
 -- ============================================================================
--- WHAT IS MEASURED, AND HOW
+-- HOW THIS COMPARES WITH HOW OTHERS MEASURE
 -- ============================================================================
 --
--- Everything is timed by the client's wall clock. Server-reported durations
--- are not used: on 2026-09-26 ollama reported 711 s of prefill inside a
--- 258 s wall clock.
+-- llama.cpp's llama-bench and MLPerf's inference rules time prefill and
+-- generation separately, repeat each, and report a mean with its spread;
+-- MLPerf additionally fixes and records the system state, and rejects a run
+-- whose conditions moved. Most published local-model numbers are one run of
+-- one prompt. This follows the first group: streamed requests so one
+-- request yields both phases from the client's own clock, several prompt
+-- sizes so the cost of a prompt is a fitted curve rather than one rate,
+-- repetition to a precision target, a machine watched during every trial,
+-- and trials taken under contention or throttling set aside.
 --
--- Every request is deterministic: temperature 0, seed 1.
---
---   window     what the server says one request can hold: llama-server's
---              n_ctx from /props, the model's trained context from ollama's
---              /api/show. hailo-ollama reports nothing.
---   prefill    a prompt of about 1,000 tokens, and 4,000 where the window
---              allows, with one output token, so the wall clock is almost
---              all prompt evaluation. Each starts with a fresh nonce so no
---              server can answer it from a prefix cache.
---   warm       the largest cold prompt sent again verbatim. The ratio to the
---              cold figure is the prefix cache, which is what decides
---              whether many small requests over one bundle are affordable.
---   decode     128 output tokens from a short prompt. Includes a few tokens
---              of prefill, which at this size is noise.
---   schema     a request with a JSON Schema response_format, and whether the
---              answer came back as the schema says. hailo-ollama answers a
---              format field with HTTP 500, so it is not asked.
---   load       how long the model takes to come into memory before it can
---              answer. On ollama the model is unloaded first (keep_alive 0),
---              then a one-token request is timed twice: the difference is
---              the load. The file may still be in the page cache from an
---              earlier load, so this is the load from RAM or from the SD
---              card, whichever the kernel happens to have; both are real
---              costs on this machine. llama-server loads its one model at
---              start, so it has no per-request load. On hailo-ollama the
---              first request after switching models is timed the same way.
---   facts      what the server itself reports about the model: exact
---              parameter count, quantisation, family, size on disk, trained
---              context. From ollama's /api/show and /api/tags and
---              llama-server's /v1/models. hailo-ollama reports nothing.
---   restraint  how readily the model refuses. Eight requests that are all
---              legitimate but look edgy on the surface, in the spirit of the
---              XSTest benchmark: killing a hung process, a villain's
---              monologue, the safe daily dose of a common painkiller, how SQL
---              injection works, how locksmiths open a lock, a dark joke, which
---              party to vote for, a sentence with a mild swear word. A model
---              that refuses many of these is stiff; one that refuses none has
---              either sensible judgement or had its refusals removed
---              (abliterated), and the answers say which. Each answer is kept.
---              The verdict is a refusal phrase near the start that no sign of
---              compliance precedes (see refuses), and `--rejudge`
---              recomputes it from the stored answers without asking again.
+-- What it does not do: it measures one request at a time. Throughput under
+-- concurrent requests is a different experiment and a different number.
 --
 -- ============================================================================
 -- WHERE THE RESULTS GO
@@ -73,87 +41,82 @@
 -- Into the measurements file in this machine's cache (OpenSlop.Measured:
 -- $OPEN_SLOP_MEASURED, else $XDG_CACHE_HOME/open-slop/measured.json), which
 -- every open-slop program lays over the catalogue it was built with. They
--- stay there until you delete the file or clear the cache. Nothing is
--- committed and nothing is rebuilt: the next llmq or llmq-models started
--- reads the new numbers.
+-- stay there until you delete the file or clear the cache. The file is
+-- written after every model, so a run that stops part way keeps what it
+-- finished, and the next run carries on from there.
 --
---   llmq-bench                 measure what is new, changed or stale
---   llmq-bench --pending       say what that would measure, and measure nothing
---   llmq-bench --all           measure everything the servers list
---   llmq-bench --rejudge       recompute the refusal verdicts from the stored
---                              answers, asking no model
---   llmq-bench --merge FILE    the same, against FILE instead of the cache
---   llmq-bench -o FILE         a fresh run of everything to FILE, or to stdout
---                              with -o -, leaving the cache alone
+--   llmq-bench                    measure what is new, changed, stale or
+--                                 from an older protocol
+--   llmq-bench --preflight        check everything an unattended run needs,
+--                                 and say what it would measure
+--   llmq-bench --pending          say what it would measure, and nothing else
+--   llmq-bench --all              measure everything the servers list
+--   llmq-bench --rejudge          recompute the refusal verdicts from the
+--                                 stored answers, asking no model
+--   llmq-bench --merge FILE       the same, against FILE instead of the cache
+--   llmq-bench -o FILE            a fresh run of everything to FILE, or to
+--                                 stdout with -o -, leaving the cache alone
 --
 -- It never starts on its own. llmq-models notices served models that need
--- measuring and says so, with this command; running it, overnight, is yours.
---
--- A model is measured when OpenSlop.Measured.decide says so: it has no
--- entry, the served model changed (ollama's digest, else the listed size,
--- differs from the one recorded), the last run recorded problems, it has no
--- restraint results and probes are wanted, or the entry is older than
--- --max-age days. An entry is replaced whole, never field by field, so
--- nothing from an older run survives beside a newer one. Entries for models
--- a server no longer lists are dropped, but only for endpoints whose listing
--- was read in this run. The file is written to FILE.tmp and renamed over
--- FILE, and not written at all when nothing changed.
+-- measuring and says so; running this, overnight, is a person's decision.
 --
 -- ============================================================================
--- llama-server
+-- UNATTENDED: --control USER@HOST
 -- ============================================================================
 --
--- The llamacpp backend is measured only when llama-server is running, and
--- the ollama models' numbers are only clean when it is not, because it
--- holds 5.5 GB on oracle. So a full night is two runs: one with it stopped,
--- and one with `--only llamacpp` after starting it. An endpoint that does
--- not answer keeps its entries, so the first run leaves the llamacpp entry
--- as it was.
+-- With it, one run covers everything (Control): llama-server is stopped for
+-- the ollama and hailo models, so it holds no memory while they are timed,
+-- then started for its own model, then left as it was found; the page cache
+-- is dropped before alternate loads, so load from the SD card is measured
+-- as well as load from RAM; and llama-server's start is timed as its load.
+-- Without it, an endpoint that does not answer is skipped and keeps its
+-- entries, and loads are from whatever the page cache holds.
 --
 -- ============================================================================
--- WHAT THE OUTPUT CONTAINS
+-- THE NUMBERS FOR A DECISION
 -- ============================================================================
 --
--- For a model the built catalogue describes: tokPerSec and a `measured`
--- block only. OpenSlop.Measured.overlay replaces those two fields and leaves
--- the hand-written summary, licence and blurb as they are.
+-- An answer of m tokens to a prompt of k thousand tokens, on a model already
+-- in memory, takes about
 --
--- For a model the built catalogue does not describe: a complete entry,
--- because the Haskell decoder requires every descriptive field. docFit and
--- licence are "unknown", and the summary and blurb say what was measured and
--- that a person has not described it yet. That is a stated absence, and it
--- lets the overlay add the model to what llmq lists. catalogue-check on the
--- row still warns about it, because the description belongs in that row's
--- configuration and is still missing there.
+--   predict.ttftSeconds(k) + (m - 1) / predict.decodeTokPerSec(k)
 --
--- Nothing here judges quality. Rate, window, cache and schema support are
--- measurable; whether a model writes good Haskell is a golden-set question.
+-- from a cold prefix cache, or reuse.ttft in place of the first term when
+-- the prompt's prefix was just sent. Add load.fromDisk or load.fromMemory
+-- and warmup when the model is not resident. The top-level tokPerSec, the
+-- prefill rows, warmPrefillSeconds and load.seconds keep the shape llmq and
+-- llmq-models already read, now as medians of repeated trials.
 module Main (main) where
 
+import Conditions (Sampler, observed, startSampler)
+import Control
+import Control.Concurrent (myThreadId, threadDelay, throwTo)
+import Control.Exception (AsyncException (UserInterrupt), finally)
 import Control.Monad (forM, forM_, unless, when)
-import Data.Aeson (Value (..), eitherDecodeFileStrict, encode, object, toJSON, (.=))
-import Data.Aeson qualified as Aeson
+import Data.Aeson (Value (..), eitherDecodeFileStrict, encode)
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy qualified as BL
+import Data.IORef
+import Data.List (nub, partition)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe)
-import Data.Scientific (toRealFloat)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Data.Time (getCurrentTime, showGregorian, utctDay)
-import Data.Time.Clock.POSIX (getPOSIXTime)
 import OpenSlop.Catalogue
 import OpenSlop.Engine (ServedModel (..), parseTags, tagsPath)
 import OpenSlop.Http
 import OpenSlop.Measured
 import Options.Applicative
-import Restraint (refuses, rejudge, restraintProbes)
+import Protocol
+import Restraint (rejudge)
 import System.Environment (lookupEnv)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, hSetEncoding, stderr, stdout, utf8)
+import System.Posix.Signals (Handler (Catch), installHandler, sigTERM)
 import Text.Printf (printf)
 
 data Opts = Opts
@@ -167,6 +130,16 @@ data Opts = Opts
   , benchAll :: Bool
   , pendingOnly :: Bool
   , rejudgeOnly :: Bool
+  , preflight :: Bool
+  , controlTarget :: Maybe Text
+  , noDisk :: Bool
+  , minReps :: Int
+  , maxReps :: Int
+  , precision :: Double
+  , sizesArg :: Text
+  , outTokens :: Int
+  , loadReps :: Int
+  , budgetMinutes :: Double
   }
 
 optsP :: Parser Opts
@@ -176,34 +149,33 @@ optsP =
     <*> optional (strOption (long "out" <> short 'o' <> metavar "FILE" <> help "a fresh run of everything to FILE, or stdout with -, leaving the measurements file alone"))
     <*> optional (strOption (long "merge" <> metavar "FILE" <> help "the measurements file to update (default $OPEN_SLOP_MEASURED, else the cache)"))
     <*> optional (strOption (long "only" <> metavar "SUBSTR" <> help "only models whose row/backend/name contains this"))
-    <*> option auto (long "timeout" <> metavar "SECS" <> value 1800 <> showDefault <> help "per request; a cold 4,000-token prefill on a 7B takes minutes")
-    <*> switch (long "no-probes" <> help "skip the restraint probes, which add several minutes per large model")
+    <*> option auto (long "timeout" <> metavar "SECS" <> value 1800 <> showDefault <> help "ceiling for one request")
+    <*> switch (long "no-probes" <> help "skip the restraint probes")
     <*> option auto (long "max-age" <> metavar "DAYS" <> value 30 <> showDefault <> help "measure an unchanged model again once its entry is this old")
     <*> switch (long "all" <> help "measure every served model, changed or not")
     <*> switch (long "pending" <> help "list what would be measured and why, and measure nothing")
-    <*> switch (long "rejudge" <> help "recompute the refusal verdicts in the measurements file from its stored answers, asking no model")
-
--- | One model's results.
-data Measured = Measured
-  { window :: Maybe Int
-  , prefill :: [(Int, Bool, Double)]
-  -- ^ (prompt tokens, whether that count is estimated, seconds)
-  , warm :: Maybe (Int, Double)
-  , decode :: Maybe (Int, Double)
-  , schema :: Text
-  , problems :: [Text]
-  , load :: Maybe Double
-  , loadNote :: Text
-  , facts :: [(Text, Value)]
-  , probes :: [(Text, Bool, Double, Text)]
-  -- ^ (probe name, refused, seconds, the opening of the answer)
-  }
+    <*> switch (long "rejudge" <> help "recompute the refusal verdicts in the measurements file from its stored answers")
+    <*> switch (long "preflight" <> help "check ssh, sudo, telemetry and every server an unattended run needs, list what it would measure, and measure nothing")
+    <*> optional (strOption (long "control" <> metavar "USER@HOST" <> help "ssh destination allowed to switch llama-server and drop the page cache on the row"))
+    <*> switch (long "no-disk" <> help "with --control: do not drop the page cache, so no load from the SD card is measured")
+    <*> option auto (long "min-reps" <> metavar "N" <> value 3 <> showDefault <> help "repetitions of every timed figure before it may stop")
+    <*> option auto (long "max-reps" <> metavar "N" <> value 6 <> showDefault <> help "repetitions of every timed figure at most")
+    <*> option auto (long "precision" <> metavar "FRACTION" <> value 0.05 <> showDefault <> help "stop repeating once the 95% interval's half-width is within this fraction of the mean")
+    <*> strOption (long "sizes" <> metavar "N,N,..." <> value "256,1024,2048,4096" <> showDefault <> help "prompt sizes in tokens; any the model's window cannot hold are left out")
+    <*> option auto (long "out-tokens" <> metavar "N" <> value 64 <> showDefault <> help "tokens generated per grid request, which is what decode is timed over")
+    <*> option auto (long "load-reps" <> metavar "N" <> value 3 <> showDefault <> help "loads per kind (from disk, from RAM)")
+    <*> option auto (long "budget" <> metavar "MINUTES" <> value 60 <> showDefault <> help "per model; after min-reps, no repetition starts that would end past it")
 
 main :: IO ()
 main = do
   hSetEncoding stdout utf8
   hSetEncoding stderr utf8
   o <- execParser (info (optsP <**> helper) (fullDesc <> progDesc "measure the served models into this machine's measurements file"))
+  -- systemctl stop sends SIGTERM, which by default ends the program without
+  -- running any cleanup. As an exception in the main thread it runs the
+  -- `finally` that puts llama-server back the way it was found.
+  mainThread <- myThreadId
+  _ <- installHandler sigTERM (Catch (throwTo mainThread UserInterrupt)) Nothing
   target <- maybe measuredPath pure o.mergeFile
   if o.rejudgeOnly
     then do
@@ -221,326 +193,203 @@ runBench o target = do
     Just p -> pure p
     Nothing -> lookupEnv "OPEN_SLOP_CATALOGUE" >>= maybe (die' "no catalogue: pass --catalogue or set OPEN_SLOP_CATALOGUE") pure
   cat <- eitherDecodeFileStrict path >>= either (die' . T.pack) pure
+  sizes <- either (die' . T.pack) pure (parseSizes o.sizesArg)
   client <- newClient
   today <- utctDay <$> getCurrentTime
   let day = T.pack (showGregorian today)
       fresh' = isJust o.out
       policy = Policy {maxAgeDays = o.maxAgeDays, wantProbes = not o.noProbes, everything = o.benchAll || fresh'}
+      ctl = Control <$> o.controlTarget
+      isLlama ep = maybe False (\b -> b.engine == LlamaServer) (Map.lookup ep.backend cat.backends)
+      (llamaEps, otherEps) = partition isLlama cat.endpoints
+      ordered = otherEps <> llamaEps
+      hosts = nub (map (hostOf . (.url)) cat.endpoints)
   prior <- if fresh' then pure emptyMeasured else readMeasured target >>= either (die' . T.pack) pure
   unless fresh' (say ("measurements file: " <> T.pack target))
 
-  results <- forM cat.endpoints \ep ->
-    case Map.lookup ep.backend cat.backends of
-      Nothing -> say ("skip " <> endpointId ep <> ": no backend " <> ep.backend <> " in the catalogue") >> pure ([], Nothing)
-      Just b -> do
-        listing <- getBody client NoAuth (ep.url <> TE.decodeUtf8 (tagsPath b.engine)) 15
-        case listing of
-          Left f -> say ("skip " <> endpointId ep <> ": " <> describeFailure f <> "; its entries are kept") >> pure ([], Nothing)
-          Right body -> case parseTags b.engine body of
-            Nothing -> say ("skip " <> endpointId ep <> ": unreadable model listing; its entries are kept") >> pure ([], Nothing)
-            Just served -> do
-              let wanted = [m.name | m <- served, maybe True (`T.isInfixOf` (endpointId ep <> "/" <> m.name)) o.only]
-              fresh <- fmap catMaybes $ forM wanted \name -> do
-                let fp = fingerprintOf body name
-                    before = pathTo ["models", ep.backend, catalogueKey name] prior
-                case decide policy today fp before of
-                  Keep why -> do
-                    say ("keep " <> endpointId ep <> "/" <> name <> ": " <> why)
-                    pure Nothing
-                  Measure why
-                    | o.pendingOnly -> do
-                        TIO.putStrLn (endpointId ep <> "/" <> name <> "  " <> why)
-                        pure Nothing
-                    | otherwise -> do
-                        say ("bench " <> endpointId ep <> "/" <> name <> ": " <> why)
-                        m <- bench o client ep b name
-                        report m
-                        pure (Just (ep.backend, catalogueKey name, entryFor day ep b (lookupModel cat ep.backend name) name fp m))
-              pure (fresh, Just (ep.backend, [catalogueKey m.name | m <- served]))
+  samplers <- if o.pendingOnly then pure Map.empty else Map.fromList <$> forM hosts \h -> (h,) <$> startSampler client h
+  let samplerFor ep = Map.lookup (hostOf ep.url) samplers
+      cfg s =
+        Config
+          { minReps = o.minReps
+          , maxReps = max o.minReps o.maxReps
+          , target = o.precision
+          , sizes = sizes
+          , outTokens = o.outTokens
+          , loadReps = o.loadReps
+          , budgetSecs = o.budgetMinutes * 60
+          , probes = not o.noProbes
+          , timeoutSecs = o.timeoutSeconds
+          , control = ctl
+          , fromDisk = not o.noDisk
+          , sampler = s
+          , client = client
+          }
 
-  let fresh = concatMap fst results
-      listed = Map.fromListWith (<>) (catMaybes (map snd results))
+  when o.preflight do
+    ok <- runPreflight o client cat ctl samplers llamaEps
+    unless ok exitFailure
+
+  -- llama-server's state before the run, restored after it.
+  llamaWasUp <- case ctl of
+    Just c | not (null llamaEps), not o.pendingOnly, not o.preflight -> Just <$> isActive c "llama-server.service"
+    _ -> pure Nothing
+  current <- newIORef prior
+  freshAll <- newIORef []
+  listedAll <- newIORef Map.empty
+  let restore = case (ctl, llamaWasUp) of
+        (Just c, Just up) -> do
+          r <- llamaServer c (if up then "start" else "stop")
+          say ("llama-server left " <> (if up then "running" else "stopped") <> " as it was found" <> either (": FAILED " <>) (const "") r)
+        _ -> pure ()
+      stopLlama = case (ctl, llamaWasUp) of
+        (Just c, Just _) -> llamaServer c "stop" >>= either (\e -> say ("could not stop llama-server: " <> e)) (const (say "llama-server stopped for the other backends"))
+        _ -> pure ()
+      startLlama ep = case ctl of
+        Just c | not o.pendingOnly, not o.preflight -> do
+          -- Nothing else may hold memory while llama-server is measured.
+          forM_ [e | e <- otherEps, hostOf e.url == hostOf ep.url, maybe False (\b -> b.engine == Ollama) (Map.lookup e.backend cat.backends)] (unloadAll client)
+          r <- llamaServer c "start"
+          case r of
+            Left e -> say ("could not start llama-server: " <> e)
+            Right () -> do
+              say "llama-server started for its own measurement; waiting for /health"
+              waitUp client ep.url 600
+        _ -> pure ()
+
+  stopLlama
+  ( forM_ ordered \ep -> do
+      when (isLlama ep) (startLlama ep)
+      case Map.lookup ep.backend cat.backends of
+        Nothing -> say ("skip " <> endpointId ep <> ": no backend " <> ep.backend <> " in the catalogue")
+        Just b -> do
+          listing <- getBody client NoAuth (ep.url <> TE.decodeUtf8 (tagsPath b.engine)) 15
+          case listing of
+            Left f -> say ("skip " <> endpointId ep <> ": " <> describeFailure f <> "; its entries are kept")
+            Right body -> case parseTags b.engine body of
+              Nothing -> say ("skip " <> endpointId ep <> ": unreadable model listing; its entries are kept")
+              Just served -> do
+                modifyIORef' listedAll (Map.insertWith (<>) ep.backend [catalogueKey m.name | m <- served])
+                let names = [m.name | m <- served]
+                    wanted = [n | n <- names, maybe True (`T.isInfixOf` (endpointId ep <> "/" <> n)) o.only]
+                forM_ wanted \name -> do
+                  cur <- readIORef current
+                  let fp = fingerprintOf body name
+                      before = pathOf ["models", ep.backend, catalogueKey name] cur
+                  case decide policy today fp before of
+                    Keep why -> say ("keep " <> endpointId ep <> "/" <> name <> ": " <> why)
+                    Measure why
+                      | o.pendingOnly || o.preflight -> TIO.putStrLn (endpointId ep <> "/" <> name <> "  " <> why)
+                      | otherwise -> do
+                          say ("bench " <> endpointId ep <> "/" <> name <> ": " <> why)
+                          let known = lookupModel cat ep.backend name
+                              numCtx = case b.engine of
+                                Ollama -> Just (fromMaybe b.ctx (known >>= (.ctx)))
+                                _ -> Nothing
+                          r <- measureModel (cfg (samplerFor ep)) (Target ep b name numCtx (filter (/= name) names))
+                          let entry = entryFor day ep b known name fp r
+                          modifyIORef' freshAll (<> [(ep.backend, catalogueKey name, entry)])
+                          unless fresh' do
+                            modifyIORef' current (\c -> mergeInto c Map.empty [(ep.backend, catalogueKey name, entry)])
+                            readIORef current >>= writeAtomic target
+                            say ("  saved to " <> T.pack target)
+    )
+    `finally` restore
+
+  fresh <- readIORef freshAll
+  listed <- readIORef listedAll
   case o.out of
-    _ | o.pendingOnly -> pure ()
+    _ | o.pendingOnly || o.preflight -> pure ()
     Just "-" -> BL.putStr (encode (mergeInto emptyMeasured Map.empty fresh)) >> putStrLn ""
     Just f -> writeAtomic f (mergeInto emptyMeasured Map.empty fresh) >> say ("wrote " <> T.pack f)
     Nothing -> do
-      let merged = mergeInto prior listed fresh
-      if merged == prior
+      cur <- readIORef current
+      let final = mergeInto cur listed []
+      if final == prior
         then say ("nothing changed; " <> T.pack target <> " left as it was")
-        else writeAtomic target merged >> say ("wrote " <> T.pack target)
+        else writeAtomic target final >> say ("wrote " <> T.pack target)
 
--- | All probes for one model, in order. A failed probe is recorded and the
--- rest still run.
---
--- Load comes first, because it needs the model out of memory and every
--- later probe puts it back in.
-bench :: Opts -> Client -> Endpoint -> Backend -> Text -> IO Measured
-bench o client ep b name = do
-  (loadSecs, loadNote') <- measureLoad o client ep b name
-  facts' <- factsOf client ep b name
-  win <- windowOf client ep b name
-  -- hailo-ollama's window is 2,048 and overflow is silent, so it gets the
-  -- small prompt only. Everything else gets both, capped by what the
-  -- server says it holds.
-  let limit = fromMaybe b.ctx win
-      sizes = [n | n <- [1000, 4000], n + 200 < limit, b.engine /= HailoOllama || n <= 1000]
-  cold <- forM sizes \n -> do
-    nonce <- T.pack . show <$> getPOSIXTime
-    let p = filler b n nonce
-    r <- ask o client ep b name p 1 False
-    pure (n, p, r)
-  let prefillPts = [(fromMaybe n pt, isNothing pt, secs) | (n, _, Right (secs, pt, _, _)) <- cold]
-      coldProblems = [T.pack (show n) <> "-token prefill: " <> e | (n, _, Left e) <- cold]
-  -- The warm figure re-sends the largest cold prompt exactly as it was
-  -- sent, so the prefix cache has everything and nothing is paid twice.
-  warmR <- case reverse [(n, p) | (n, p, Right _) <- cold] of
-    [] -> pure Nothing
-    ((n, p) : _) -> do
-      r <- ask o client ep b name p 1 False
-      pure (either (const Nothing) (\(s, pt, _, _) -> Just (fromMaybe n pt, s)) r)
-  decR <- ask o client ep b name "Count upward from one in English words, separated by spaces. Do not stop early." (if b.engine == HailoOllama then 64 else 128) False
-  let decodePt = case decR of
-        Right (s, _, Just ct, _) | ct > 0 -> Just (ct, s)
-        _ -> Nothing
-  sch <-
-    if b.engine == HailoOllama
-      then pure "not asked: hailo-ollama answers a format field with HTTP 500"
-      else do
-        r <- ask o client ep b name "What is two plus two? Reply in the requested JSON." 40 True
+-- | Everything an unattended run depends on, checked now rather than
+-- discovered at three in the morning.
+runPreflight :: Opts -> Client -> Catalogue -> Maybe Control -> Map.Map Text Sampler -> [Endpoint] -> IO Bool
+runPreflight o client cat ctl samplers llamaEps = do
+  results <- newIORef []
+  let check name act = do
+        r <- act
+        TIO.putStrLn ((if either (const False) (const True) r then "ok    " else "FAIL  ") <> name <> either (": " <>) (\d -> if T.null d then "" else ": " <> d) r)
+        modifyIORef' results (r :)
+  forM_ cat.endpoints \ep -> check ("server " <> endpointId ep) do
+    case Map.lookup ep.backend cat.backends of
+      Nothing -> pure (Left "no such backend in the catalogue")
+      Just b -> do
+        r <- getBody client NoAuth (ep.url <> TE.decodeUtf8 (tagsPath b.engine)) 10
         pure case r of
-          Left e -> "rejected: " <> T.take 120 e
-          Right (_, _, _, content) ->
-            case Aeson.decode (BL.fromStrict (TE.encodeUtf8 content)) :: Maybe Value of
-              Just (Object km) | KeyMap.member "answer" km -> "honoured"
-              _ -> "ignored: the answer did not match the schema"
-  probeResults <-
-    if o.noProbes
-      then pure []
-      else forM restraintProbes \(probeName, prompt) -> do
-        r <- ask o client ep b name prompt 120 False
-        pure case r of
-          Left e -> (probeName, False, 0, "no answer: " <> T.take 120 e)
-          Right (secs, _, _, content) -> (probeName, refuses probeName content, secs, T.take 300 (T.strip content))
-  pure
-    Measured
-      { window = win
-      , prefill = prefillPts
-      , warm = warmR
-      , decode = decodePt
-      , schema = sch
-      , problems = coldProblems <> [e | Left e <- [decR]]
-      , load = loadSecs
-      , loadNote = loadNote'
-      , facts = facts'
-      , probes = probeResults
-      }
+          Right body -> Right (maybe "unreadable listing" (\ms -> T.pack (show (length ms)) <> " models") (parseTags b.engine body))
+          Left f
+            | b.engine == LlamaServer && isJust ctl -> Right "not running now; the run starts it"
+            | otherwise -> Left (describeFailure f)
+  threadDelay 5000000
+  forM_ (Map.toList samplers) \(h, s) -> check ("telemetry " <> h <> ":9100") do
+    seen <- observed s
+    pure (if seen then Right "" else Left "no node exporter answer; trials cannot be checked for contention or throttling")
+  case ctl of
+    Nothing -> TIO.putStrLn "--    no --control: llama-server is not switched, loads are not measured from disk, llama-server's start is not timed"
+    Just c -> do
+      check ("ssh " <> c.target) (remote c ["true"])
+      unless o.noDisk $ check "sudo -n sysctl -w vm.drop_caches=3" (fmap (const "the page cache can be dropped") <$> dropCaches c)
+      unless (null llamaEps) $ check "llama-server start, health and stop" do
+        up <- isActive c "llama-server.service"
+        r1 <- llamaServer c "start"
+        healthy <- case (r1, llamaEps) of
+          (Right (), ep : _) -> waitUp client ep.url 300 >> either (const False) (const True) <$> getBody client NoAuth (ep.url <> "/health") 5
+          _ -> pure False
+        r2 <- llamaServer c (if up then "start" else "stop")
+        pure case (r1, healthy, r2) of
+          (Left e, _, _) -> Left e
+          (_, False, _) -> Left "started but /health did not answer within 300 s"
+          (_, _, Left e) -> Left e
+          _ -> Right ("restored to " <> if up then "running" else "stopped")
+  rs <- readIORef results
+  TIO.putStrLn ""
+  TIO.putStrLn ("Models that would be measured, at most " <> T.pack (printf "%.0f" o.budgetMinutes) <> " minutes each plus loads and probes:")
+  pure (all (either (const False) (const True)) rs)
 
--- | How long the model takes to come into memory, and how that was found.
-measureLoad :: Opts -> Client -> Endpoint -> Backend -> Text -> IO (Maybe Double, Text)
-measureLoad o client ep b name = case b.engine of
-  LlamaServer -> pure (Nothing, "loaded once when llama-server starts; no per-request load")
-  Ollama -> do
-    -- keep_alive 0 with no prompt unloads the model and returns at once.
-    _ <- postJsonWithin (Just 120) client NoAuth ep.url "/api/generate" (object ["model" .= name, "keep_alive" .= (0 :: Int)])
-    timedPair "unloaded with keep_alive 0, then a one-token request timed cold and warm"
-  HailoOllama -> timedPair "a one-token request timed right after the previous model, then again"
+waitUp :: Client -> Text -> Int -> IO ()
+waitUp client url limit = loop limit
   where
-    timedPair note = do
-      first <- ask o client ep b name "Reply with the word ok." 1 False
-      second <- ask o client ep b name "Reply with the word ok." 1 False
-      pure case (first, second) of
-        (Right (a, _, _, _), Right (c, _, _, _)) -> (Just (max 0 (a - c)), note)
-        _ -> (Nothing, "the load probe failed: " <> note)
+    loop n = do
+      r <- getBody client NoAuth (url <> "/health") 5
+      case r of
+        Right _ -> pure ()
+        Left _ | n > 0 -> threadDelay 2000000 >> loop (n - 2)
+        Left _ -> say ("llama-server did not answer /health within " <> T.pack (show limit) <> " s")
 
--- | What the server reports about the model itself.
-factsOf :: Client -> Endpoint -> Backend -> Text -> IO [(Text, Value)]
-factsOf client ep b name = case b.engine of
-  Ollama -> do
-    shown <- postJsonWithin (Just 30) client NoAuth ep.url "/api/show" (object ["model" .= name])
-    tags <- getBody client NoAuth (ep.url <> "/api/tags") 15
-    let showV = either (const Nothing) Aeson.decode shown :: Maybe Value
-        tagV = either (const Nothing) Aeson.decode tags :: Maybe Value
-        sizeBytes = do
-          Array ms <- tagV >>= pathTo ["models"]
-          listToMaybe [n | m <- foldr (:) [] ms, textAt ["name"] m == Just name, Just n <- [intAt ["size"] m]]
-        paramCount = do
-          Object mi <- showV >>= pathTo ["model_info"]
-          Number n <- KeyMap.lookup "general.parameter_count" mi
-          pure (round (toRealFloat n :: Double) :: Integer)
-    pure $
-      catMaybes
-        [ ("parameterCount",) . toJSON <$> paramCount
-        , ("parameterSize",) . String <$> (showV >>= textAt ["details", "parameter_size"])
-        , ("quantization",) . String <$> (showV >>= textAt ["details", "quantization_level"])
-        , ("family",) . String <$> (showV >>= textAt ["details", "family"])
-        , ("format",) . String <$> (showV >>= textAt ["details", "format"])
-        , ("sizeBytes",) . toJSON <$> sizeBytes
-        ]
-  LlamaServer -> do
-    r <- getBody client NoAuth (ep.url <> "/v1/models") 15
-    let v = either (const Nothing) Aeson.decode r :: Maybe Value
-        meta = do
-          Array ds <- v >>= pathTo ["data"]
-          d <- listToMaybe (foldr (:) [] ds)
-          pathTo ["meta"] d
-    pure $
-      catMaybes
-        [ ("parameterCount",) . toJSON <$> (meta >>= intAt ["n_params"])
-        , ("sizeBytes",) . toJSON <$> (meta >>= intAt ["size"])
-        , ("trainedContext",) . toJSON <$> (meta >>= intAt ["n_ctx_train"])
-        , ("vocabulary",) . toJSON <$> (meta >>= intAt ["n_vocab"])
-        ]
-  HailoOllama -> pure []
+parseSizes :: Text -> Either String [Int]
+parseSizes t = case mapM (\s -> case reads (T.unpack (T.strip s)) of [(n, "")] | n > 0 -> Just n; _ -> Nothing) (T.splitOn "," t) of
+  Just ns | not (null ns) -> Right ns
+  _ -> Left ("--sizes wants positive integers separated by commas, not " <> T.unpack t)
 
--- | One request, timed by wall clock. Returns seconds, the server's prompt
--- token count if it gave one, the completion token count if it gave one,
--- and the text.
-ask :: Opts -> Client -> Endpoint -> Backend -> Text -> Text -> Int -> Bool -> IO (Either Text (Double, Maybe Int, Maybe Int, Text))
-ask o client ep b name prompt maxTokens withSchema = do
-  t0 <- getPOSIXTime
-  r <- case b.engine of
-    HailoOllama ->
-      postJsonWithin
-        (Just o.timeoutSeconds)
-        client
-        NoAuth
-        ep.url
-        "/api/generate"
-        (object ["model" .= name, "prompt" .= prompt, "stream" .= False, "options" .= object ["num_predict" .= maxTokens]])
-    _ ->
-      postJsonWithin
-        (Just o.timeoutSeconds)
-        client
-        NoAuth
-        ep.url
-        "/v1/chat/completions"
-        ( object
-            ( [ "model" .= name
-              , "messages" .= [object ["role" .= ("user" :: Text), "content" .= prompt]]
-              , "max_tokens" .= maxTokens
-              , "temperature" .= (0 :: Int)
-              , "seed" .= (1 :: Int)
-              , "stream" .= False
-              ]
-                <> [ "response_format"
-                       .= object
-                         [ "type" .= ("json_schema" :: Text)
-                         , "json_schema"
-                             .= object
-                               [ "name" .= ("probe" :: Text)
-                               , "strict" .= True
-                               , "schema"
-                                   .= object
-                                     [ "type" .= ("object" :: Text)
-                                     , "properties" .= object ["answer" .= object ["type" .= ("string" :: Text)]]
-                                     , "required" .= (["answer"] :: [Text])
-                                     , "additionalProperties" .= False
-                                     ]
-                               ]
-                         ]
-                   | withSchema
-                   ]
-            )
-        )
-  t1 <- getPOSIXTime
-  let secs = realToFrac (t1 - t0) :: Double
-  pure case r of
-    Left f -> Left (describeFailure f)
-    Right body -> case Aeson.decode body :: Maybe Value of
-      Nothing -> Left "the answer was not JSON"
-      Just v -> case b.engine of
-        HailoOllama -> Right (secs, Nothing, intAt ["eval_count"] v, fromMaybe "" (textAt ["response"] v))
-        _ ->
-          Right
-            ( secs
-            , intAt ["usage", "prompt_tokens"] v
-            , intAt ["usage", "completion_tokens"] v
-            , fromMaybe "" (firstChoice v)
-            )
-  where
-    firstChoice v = case pathTo ["choices"] v of
-      Just (Array xs) | (c : _) <- foldr (:) [] xs -> textAt ["message", "content"] c
-      _ -> Nothing
+hostOf :: Text -> Text
+hostOf u = T.takeWhile (/= ':') (fromMaybe u (T.stripPrefix "http://" u))
 
--- | What the server says a request can hold.
-windowOf :: Client -> Endpoint -> Backend -> Text -> IO (Maybe Int)
-windowOf client ep b name = case b.engine of
-  LlamaServer -> do
-    r <- getBody client NoAuth (ep.url <> "/props") 15
-    pure (either (const Nothing) (\body -> Aeson.decode body >>= intAt ["default_generation_settings", "n_ctx"]) r)
-  Ollama -> do
-    r <- postJsonWithin (Just 15) client NoAuth ep.url "/api/show" (object ["model" .= name])
-    pure case r of
-      Left _ -> Nothing
-      Right body -> do
-        v <- Aeson.decode body
-        Object mi <- pathTo ["model_info"] v
-        case [n | (k, Number n) <- KeyMap.toList mi, ".context_length" `T.isSuffixOf` Key.toText k] of
-          (n : _) -> Just (round (toRealFloat n :: Double))
-          [] -> Nothing
-  HailoOllama -> pure Nothing
-
--- | A prompt of about n tokens, estimated from the backend's bytes per
--- token, opening with a nonce so no prefix cache can serve it.
-filler :: Backend -> Int -> Text -> Text
-filler b n nonce =
-  let paragraph =
-        "module Probe where\n\
-        \-- | Sum a list strictly, left to right, starting from zero.\n\
-        \total :: [Int] -> Int\n\
-        \total = go 0\n\
-        \  where\n\
-        \    go acc [] = acc\n\
-        \    go acc (x : xs) = let acc' = acc + x in acc' `seq` go acc' xs\n"
-      bytes = floor (fromIntegral n * b.charsPerToken) :: Int
-      body = T.take bytes (T.replicate (bytes `div` T.length paragraph + 1) paragraph)
-   in "Probe " <> nonce <> ".\n" <> body <> "\nReply with the word ok."
-
--- | The catalogue.extra entry for one model.
-entryFor :: Text -> Endpoint -> Backend -> Maybe Model -> Text -> Maybe Text -> Measured -> Value
-entryFor day ep b known name fp m =
+-- | The catalogue entry for one measured model.
+entryFor :: Text -> Endpoint -> Backend -> Maybe Model -> Text -> Maybe Text -> Result -> Value
+entryFor day ep b known name fp r =
   Object (KeyMap.fromList (measuredFields <> descriptive))
   where
-    decodeRate = fmap (\(n, s) -> fromIntegral n / s) m.decode :: Maybe Double
     measuredFields =
-      [ ("tokPerSec", maybe Null (Number . realToFrac . round2) decodeRate)
+      [ ("tokPerSec", maybe Null (Number . realToFrac) r.tokPerSec)
       , ( "measured"
-        , object
-            [ "on" .= day
-            , "fingerprint" .= fp
-            , "endpoint" .= endpointId ep
-            , "engine" .= engineName b.engine
-            , "window" .= m.window
-            , "prefill"
-                .= [ object
-                       [ "promptTokens" .= n
-                       , "tokensEstimated" .= est
-                       , "seconds" .= round2 s
-                       , "tokPerSec" .= round2 (fromIntegral n / s)
-                       ]
-                   | (n, est, s) <- m.prefill
-                   ]
-            , "warmPrefillSeconds" .= fmap (round2 . snd) m.warm
-            , "decode" .= fmap (\(n, s) -> object ["tokens" .= n, "seconds" .= round2 s, "tokPerSec" .= round2 (fromIntegral n / s)]) m.decode
-            , "schema" .= m.schema
-            , "problems" .= m.problems
-            , "load" .= object ["seconds" .= fmap round2 m.load, "method" .= m.loadNote]
-            , "facts" .= Object (KeyMap.fromList [(Key.fromText k, v) | (k, v) <- m.facts])
-            , "restraint"
-                .= if null m.probes
-                  then Null
-                  else
-                    object
-                      [ "asked" .= length m.probes
-                      , "refused" .= length [() | (_, True, _, _) <- m.probes]
-                      , "refusedWhich" .= [p | (p, True, _, _) <- m.probes]
-                      , "probes"
-                          .= [ object ["probe" .= p, "refused" .= r, "seconds" .= round2 secs, "answer" .= a]
-                             | (p, r, secs, a) <- m.probes
-                             ]
-                      ]
-            ]
+        , Object
+            ( KeyMap.fromList
+                ( [ ("on", String day)
+                  , ("fingerprint", maybe Null String fp)
+                  , ("endpoint", String (endpointId ep))
+                  , ("engine", String (engineName b.engine))
+                  ]
+                    <> r.measured
+                )
+            )
         )
       ]
     descriptive = case known of
@@ -562,58 +411,12 @@ entryFor day ep b known name fp m =
               )
           )
         ]
-    rateLine =
-      T.intercalate
-        ", "
-        ( [T.pack (printf "decode %.2f tok/s" r) | Just r <- [decodeRate]]
-            <> [T.pack (printf "prefill %.1f tok/s at %d tokens" (fromIntegral n / s :: Double) n) | (n, _, s) <- take 1 (reverse m.prefill)]
-            <> ["schema " <> T.takeWhile (/= ':') m.schema]
-        )
+    rateLine = maybe "decode not measured" (T.pack . printf "decode %.2f tok/s (median)") r.tokPerSec
 
-report :: Measured -> IO ()
-report m = do
-  forM_ m.prefill \(n, est, s) ->
-    say (T.pack (printf "  prefill %d%s tokens: %.1f s, %.1f tok/s" n (if est then " (estimated)" else "" :: String) s (fromIntegral n / s :: Double)))
-  forM_ m.warm \(n, s) -> say (T.pack (printf "  warm %d tokens: %.1f s" n s))
-  forM_ m.decode \(n, s) -> say (T.pack (printf "  decode %d tokens: %.1f s, %.2f tok/s" n s (fromIntegral n / s :: Double)))
-  say ("  window: " <> maybe "not reported" (T.pack . show) m.window <> "; schema: " <> m.schema)
-  say ("  load: " <> maybe "none per request" (\l -> T.pack (printf "%.1f s" l)) m.load)
-  unless (null m.facts) (say ("  facts: " <> T.intercalate ", " [k <> "=" <> showValue v | (k, v) <- m.facts]))
-  unless (null m.probes) do
-    let refused = [p | (p, True, _, _) <- m.probes]
-    say
-      ( "  restraint: refused "
-          <> T.pack (show (length refused))
-          <> " of "
-          <> T.pack (show (length m.probes))
-          <> if null refused then "" else " (" <> T.intercalate ", " refused <> ")"
-      )
-  forM_ m.problems \p -> say ("  PROBLEM " <> p)
-  when (null m.prefill && isNothing m.decode) (say "  nothing measured")
-
-pathTo :: [Text] -> Value -> Maybe Value
-pathTo [] v = Just v
-pathTo (k : ks) (Object o) = KeyMap.lookup (Key.fromText k) o >>= pathTo ks
-pathTo _ _ = Nothing
-
-intAt :: [Text] -> Value -> Maybe Int
-intAt p v = case pathTo p v of
-  Just (Number n) -> Just (round (toRealFloat n :: Double))
-  _ -> Nothing
-
-textAt :: [Text] -> Value -> Maybe Text
-textAt p v = case pathTo p v of
-  Just (String t) -> Just t
-  _ -> Nothing
-
-showValue :: Value -> Text
-showValue = \case
-  String t -> t
-  Number n -> T.pack (show (round (toRealFloat n :: Double) :: Integer))
-  v -> TE.decodeUtf8 (BL.toStrict (encode v))
-
-round2 :: Double -> Double
-round2 x = fromIntegral (round (x * 100) :: Integer) / 100
+pathOf :: [Text] -> Value -> Maybe Value
+pathOf [] v = Just v
+pathOf (k : ks) (Object obj) = KeyMap.lookup (Key.fromText k) obj >>= pathOf ks
+pathOf _ _ = Nothing
 
 say :: Text -> IO ()
 say = TIO.hPutStrLn stderr . ("llmq-bench: " <>)
