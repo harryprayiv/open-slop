@@ -45,11 +45,18 @@
 -- WHAT IS DONE ABOUT IT
 -- ============================================================================
 --
---   The clock is judged by its mean over the trial, which is the fraction
---   of the trial the CPU spent at full speed, and so what the timing
---   depends on. On a Pi the firmware's own "throttled now" bits count as
---   well: a trial during which more than a tenth of the samples had them
---   set is sustained even if the clock samples missed the drop.
+--   On a Pi the firmware's own "capped, throttled or at the soft
+--   temperature limit now" bits decide: a trial during which more than a
+--   tenth of the samples had any of them set is sustained. The clock is
+--   recorded but does not decide, because the firmware's clock also falls
+--   when the CPU is idle (1.6 GHz at 55 C on 2026-09-30, with no throttle
+--   bit set), and a trial's first sample, or the sample before a short
+--   trial, is often taken before the load arrives; a clock rule would call
+--   those trials throttled. The bits say why the clock is low, which is
+--   the only thing that matters here.
+--
+--   Without firmware bits (not a Pi), the clock decides: a mean over the
+--   trial under 97% of maximum is sustained.
 --
 --   Every timed request waits first for an idle machine below a starting
 --   temperature (`waitCool`). Every trial therefore starts from the same
@@ -58,12 +65,12 @@
 --
 --   A trial is then put in a regime by what it measured, not by guess:
 --
---     burst      the mean clock stayed at or above 97% of maximum and the
---                firmware reported no throttling: what a request to an
---                idle machine gets
---     sustained  the clock fell below that: what a request gets once the
---                machine has been working long enough to throttle, which
---                on bare cooling a long prompt does by itself
+--     burst      the firmware reported no throttling (elsewhere: the mean
+--                clock stayed at or above 97% of maximum): what a request
+--                to an idle machine gets
+--     sustained  it did: what a request gets once the machine has been
+--                working long enough to throttle, which on bare cooling a
+--                long prompt does by itself
 --     contended  the median number of runnable tasks was more than the
 --                core count plus two: someone else was using the machine,
 --                and the trial describes nothing about the model
@@ -167,7 +174,8 @@ regimeName = \case
 data Verdict = Verdict
   { regime :: Regime
   , meanClock :: Maybe Double
-  -- ^ mean CPU clock over maximum during the trial
+  -- ^ mean CPU clock over maximum during the trial; recorded, and decisive
+  -- only where there are no firmware bits
   , maxTemp :: Maybe Double
   , throttledShare :: Maybe Double
   -- ^ the fraction of samples in which the firmware said it was throttling
@@ -186,8 +194,8 @@ judge ss =
       share = if null flags then Nothing else Just (fromIntegral (length (filter id flags)) / fromIntegral (length flags))
       reg
         | maybe False (> fromIntegral coreCount + 2) procs = Contended
+        | Just sh <- share = if sh > 0.1 then Sustained else Burst
         | maybe False (< 0.97) clock = Sustained
-        | maybe False (> 0.1) share = Sustained
         | otherwise = Burst
    in Verdict
         { regime = reg
