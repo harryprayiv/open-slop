@@ -59,6 +59,7 @@ library
     OpenSlop.Grace.Docs
     OpenSlop.Http
     OpenSlop.Job
+    OpenSlop.Measured
     OpenSlop.OpenAI
     OpenSlop.Stats
   build-depends:

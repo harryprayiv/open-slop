@@ -8,8 +8,8 @@
 -- Adding a model used to mean hand-writing a catalogue entry, and the
 -- numbers in it were whatever someone measured once, on whatever prompt
 -- they had. This runs the same fixed probes against every served model and
--- emits JSON shaped for services.open-slop.catalogue.extra, so a new model
--- is described by measuring it rather than by editing open-slop.
+-- keeps the results beside the catalogue rather than in it, so a new model
+-- gets numbers by being measured rather than by anyone editing a file.
 --
 -- It needs no configuration: the endpoints come from the catalogue llmq
 -- already reads ($OPEN_SLOP_CATALOGUE, which Nix writes with the consumer's
@@ -63,24 +63,68 @@
 --              either sensible judgement or had its refusals removed
 --              (abliterated), and the answers say which. Each answer is kept.
 --              The verdict is a refusal phrase near the start that no sign of
---              compliance precedes (see refuses), and `--rejudge FILE`
+--              compliance precedes (see refuses), and `--rejudge`
 --              recomputes it from the stored answers without asking again.
+--
+-- ============================================================================
+-- WHERE THE RESULTS GO
+-- ============================================================================
+--
+-- Into the measurements file in this machine's cache (OpenSlop.Measured:
+-- $OPEN_SLOP_MEASURED, else $XDG_CACHE_HOME/open-slop/measured.json), which
+-- every open-slop program lays over the catalogue it was built with. They
+-- stay there until you delete the file or clear the cache. Nothing is
+-- committed and nothing is rebuilt: the next llmq or llmq-models started
+-- reads the new numbers.
+--
+--   llmq-bench                 measure what is new, changed or stale
+--   llmq-bench --pending       say what that would measure, and measure nothing
+--   llmq-bench --all           measure everything the servers list
+--   llmq-bench --rejudge       recompute the refusal verdicts from the stored
+--                              answers, asking no model
+--   llmq-bench --merge FILE    the same, against FILE instead of the cache
+--   llmq-bench -o FILE         a fresh run of everything to FILE, or to stdout
+--                              with -o -, leaving the cache alone
+--
+-- It never starts on its own. llmq-models notices served models that need
+-- measuring and says so, with this command; running it, overnight, is yours.
+--
+-- A model is measured when OpenSlop.Measured.decide says so: it has no
+-- entry, the served model changed (ollama's digest, else the listed size,
+-- differs from the one recorded), the last run recorded problems, it has no
+-- restraint results and probes are wanted, or the entry is older than
+-- --max-age days. An entry is replaced whole, never field by field, so
+-- nothing from an older run survives beside a newer one. Entries for models
+-- a server no longer lists are dropped, but only for endpoints whose listing
+-- was read in this run. The file is written to FILE.tmp and renamed over
+-- FILE, and not written at all when nothing changed.
+--
+-- ============================================================================
+-- llama-server
+-- ============================================================================
+--
+-- The llamacpp backend is measured only when llama-server is running, and
+-- the ollama models' numbers are only clean when it is not, because it
+-- holds 5.5 GB on oracle. So a full night is two runs: one with it stopped,
+-- and one with `--only llamacpp` after starting it. An endpoint that does
+-- not answer keeps its entries, so the first run leaves the llamacpp entry
+-- as it was.
 --
 -- ============================================================================
 -- WHAT THE OUTPUT CONTAINS
 -- ============================================================================
 --
--- For a model the catalogue already describes: tokPerSec and a `measured`
--- block only. Nix merges catalogue.extra with recursiveUpdate, so the
--- hand-written summary, licence and blurb survive and only the numbers
--- change.
+-- For a model the built catalogue describes: tokPerSec and a `measured`
+-- block only. OpenSlop.Measured.overlay replaces those two fields and leaves
+-- the hand-written summary, licence and blurb as they are.
 --
--- For a model the catalogue does not describe: a complete entry, because
--- the Haskell decoder requires every descriptive field. docFit and licence
--- are "unknown", and the summary and blurb say what was measured and that
--- a person has not described it yet. That is a stated absence, and the
--- warning catalogue-check prints for an undescribed model goes away because
--- the model is now in the catalogue with honest placeholders.
+-- For a model the built catalogue does not describe: a complete entry,
+-- because the Haskell decoder requires every descriptive field. docFit and
+-- licence are "unknown", and the summary and blurb say what was measured and
+-- that a person has not described it yet. That is a stated absence, and it
+-- lets the overlay add the model to what llmq lists. catalogue-check on the
+-- row still warns about it, because the description belongs in that row's
+-- configuration and is still missing there.
 --
 -- Nothing here judges quality. Rate, window, cache and schema support are
 -- measurable; whether a model writes good Haskell is a golden-set question.
@@ -93,42 +137,51 @@ import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy qualified as BL
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Scientific (toRealFloat)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
-import Data.Time (defaultTimeLocale, formatTime, getCurrentTime)
+import Data.Time (getCurrentTime, showGregorian, utctDay)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import OpenSlop.Catalogue
 import OpenSlop.Engine (ServedModel (..), parseTags, tagsPath)
 import OpenSlop.Http
+import OpenSlop.Measured
 import Options.Applicative
 import Restraint (refuses, rejudge, restraintProbes)
 import System.Environment (lookupEnv)
-import System.Exit (exitFailure, exitSuccess)
+import System.Exit (exitFailure)
 import System.IO (hPutStrLn, hSetEncoding, stderr, stdout, utf8)
 import Text.Printf (printf)
 
 data Opts = Opts
   { catalogueFile :: Maybe FilePath
   , out :: Maybe FilePath
+  , mergeFile :: Maybe FilePath
   , only :: Maybe Text
   , timeoutSeconds :: Int
   , noProbes :: Bool
-  , rejudgeFile :: Maybe FilePath
+  , maxAgeDays :: Integer
+  , benchAll :: Bool
+  , pendingOnly :: Bool
+  , rejudgeOnly :: Bool
   }
 
 optsP :: Parser Opts
 optsP =
   Opts
-    <$> optional (strOption (long "catalogue" <> metavar "FILE" <> help "catalogue JSON (default $OPEN_SLOP_CATALOGUE)"))
-    <*> optional (strOption (long "out" <> short 'o' <> metavar "FILE" <> help "write the catalogue.extra JSON here (default stdout)"))
-    <*> optional (strOption (long "only" <> metavar "SUBSTR" <> help "bench only models whose row/backend/name contains this"))
+    <$> optional (strOption (long "catalogue" <> metavar "FILE" <> help "the built catalogue JSON (default $OPEN_SLOP_CATALOGUE)"))
+    <*> optional (strOption (long "out" <> short 'o' <> metavar "FILE" <> help "a fresh run of everything to FILE, or stdout with -, leaving the measurements file alone"))
+    <*> optional (strOption (long "merge" <> metavar "FILE" <> help "the measurements file to update (default $OPEN_SLOP_MEASURED, else the cache)"))
+    <*> optional (strOption (long "only" <> metavar "SUBSTR" <> help "only models whose row/backend/name contains this"))
     <*> option auto (long "timeout" <> metavar "SECS" <> value 1800 <> showDefault <> help "per request; a cold 4,000-token prefill on a 7B takes minutes")
     <*> switch (long "no-probes" <> help "skip the restraint probes, which add several minutes per large model")
-    <*> optional (strOption (long "rejudge" <> metavar "FILE" <> help "recompute the refusal verdicts in an existing output from its stored answers, asking no model; writes to --out or stdout"))
+    <*> option auto (long "max-age" <> metavar "DAYS" <> value 30 <> showDefault <> help "measure an unchanged model again once its entry is this old")
+    <*> switch (long "all" <> help "measure every served model, changed or not")
+    <*> switch (long "pending" <> help "list what would be measured and why, and measure nothing")
+    <*> switch (long "rejudge" <> help "recompute the refusal verdicts in the measurements file from its stored answers, asking no model")
 
 -- | One model's results.
 data Measured = Measured
@@ -150,57 +203,72 @@ main :: IO ()
 main = do
   hSetEncoding stdout utf8
   hSetEncoding stderr utf8
-  o <- execParser (info (optsP <**> helper) (fullDesc <> progDesc "measure every served model and write catalogue data"))
-  case o.rejudgeFile of
-    Just f -> do
-      v <- eitherDecodeFileStrict f >>= either (die' . T.pack) pure
-      let out' = encode (rejudge v)
-      case o.out of
-        Nothing -> BL.putStr out' >> putStrLn ""
-        Just dest -> BL.writeFile dest out' >> say ("rejudged " <> T.pack f <> " into " <> T.pack dest)
-      exitSuccess
-    Nothing -> pure ()
+  o <- execParser (info (optsP <**> helper) (fullDesc <> progDesc "measure the served models into this machine's measurements file"))
+  target <- maybe measuredPath pure o.mergeFile
+  if o.rejudgeOnly
+    then do
+      old <- readMeasured target >>= either (die' . T.pack) pure
+      writeAtomic target (rejudge old)
+      say ("rejudged " <> T.pack target)
+    else runBench o target
+
+runBench :: Opts -> FilePath -> IO ()
+runBench o target = do
+  -- The built catalogue, not the overlaid one: whether a model is described
+  -- decides whether its entry needs placeholder descriptions, and a
+  -- placeholder that came from the measurements file describes nothing.
   path <- case o.catalogueFile of
     Just p -> pure p
     Nothing -> lookupEnv "OPEN_SLOP_CATALOGUE" >>= maybe (die' "no catalogue: pass --catalogue or set OPEN_SLOP_CATALOGUE") pure
   cat <- eitherDecodeFileStrict path >>= either (die' . T.pack) pure
   client <- newClient
-  day <- T.pack . formatTime defaultTimeLocale "%Y-%m-%d" <$> getCurrentTime
+  today <- utctDay <$> getCurrentTime
+  let day = T.pack (showGregorian today)
+      fresh' = isJust o.out
+      policy = Policy {maxAgeDays = o.maxAgeDays, wantProbes = not o.noProbes, everything = o.benchAll || fresh'}
+  prior <- if fresh' then pure emptyMeasured else readMeasured target >>= either (die' . T.pack) pure
+  unless fresh' (say ("measurements file: " <> T.pack target))
 
-  entries <- fmap concat $ forM cat.endpoints \ep ->
+  results <- forM cat.endpoints \ep ->
     case Map.lookup ep.backend cat.backends of
-      Nothing -> say ("skip " <> endpointId ep <> ": no backend " <> ep.backend <> " in the catalogue") >> pure []
+      Nothing -> say ("skip " <> endpointId ep <> ": no backend " <> ep.backend <> " in the catalogue") >> pure ([], Nothing)
       Just b -> do
         listing <- getBody client NoAuth (ep.url <> TE.decodeUtf8 (tagsPath b.engine)) 15
         case listing of
-          Left f -> say ("skip " <> endpointId ep <> ": " <> describeFailure f) >> pure []
+          Left f -> say ("skip " <> endpointId ep <> ": " <> describeFailure f <> "; its entries are kept") >> pure ([], Nothing)
           Right body -> case parseTags b.engine body of
-            Nothing -> say ("skip " <> endpointId ep <> ": unreadable model listing") >> pure []
+            Nothing -> say ("skip " <> endpointId ep <> ": unreadable model listing; its entries are kept") >> pure ([], Nothing)
             Just served -> do
               let wanted = [m.name | m <- served, maybe True (`T.isInfixOf` (endpointId ep <> "/" <> m.name)) o.only]
-              fmap catMaybes $ forM wanted \name -> do
-                say ("bench " <> endpointId ep <> "/" <> name)
-                m <- bench o client ep b name
-                report m
-                pure (Just (ep.backend, catalogueKey name, entryFor day ep b (lookupModel cat ep.backend name) name m))
+              fresh <- fmap catMaybes $ forM wanted \name -> do
+                let fp = fingerprintOf body name
+                    before = pathTo ["models", ep.backend, catalogueKey name] prior
+                case decide policy today fp before of
+                  Keep why -> do
+                    say ("keep " <> endpointId ep <> "/" <> name <> ": " <> why)
+                    pure Nothing
+                  Measure why
+                    | o.pendingOnly -> do
+                        TIO.putStrLn (endpointId ep <> "/" <> name <> "  " <> why)
+                        pure Nothing
+                    | otherwise -> do
+                        say ("bench " <> endpointId ep <> "/" <> name <> ": " <> why)
+                        m <- bench o client ep b name
+                        report m
+                        pure (Just (ep.backend, catalogueKey name, entryFor day ep b (lookupModel cat ep.backend name) name fp m))
+              pure (fresh, Just (ep.backend, [catalogueKey m.name | m <- served]))
 
-  let byBackend =
-        Map.fromListWith
-          (<>)
-          [(bk, [(nm, e)]) | (bk, nm, e) <- entries]
-      doc =
-        object
-          [ "models"
-              .= Object
-                ( KeyMap.fromList
-                    [ (Key.fromText bk, Object (KeyMap.fromList [(Key.fromText nm, e) | (nm, e) <- ms]))
-                    | (bk, ms) <- Map.toList byBackend
-                    ]
-                )
-          ]
+  let fresh = concatMap fst results
+      listed = Map.fromListWith (<>) (catMaybes (map snd results))
   case o.out of
-    Nothing -> BL.putStr (encode doc) >> putStrLn ""
-    Just f -> BL.writeFile f (encode doc) >> say ("wrote " <> T.pack f)
+    _ | o.pendingOnly -> pure ()
+    Just "-" -> BL.putStr (encode (mergeInto emptyMeasured Map.empty fresh)) >> putStrLn ""
+    Just f -> writeAtomic f (mergeInto emptyMeasured Map.empty fresh) >> say ("wrote " <> T.pack f)
+    Nothing -> do
+      let merged = mergeInto prior listed fresh
+      if merged == prior
+        then say ("nothing changed; " <> T.pack target <> " left as it was")
+        else writeAtomic target merged >> say ("wrote " <> T.pack target)
 
 -- | All probes for one model, in order. A failed probe is recorded and the
 -- rest still run.
@@ -430,8 +498,8 @@ filler b n nonce =
    in "Probe " <> nonce <> ".\n" <> body <> "\nReply with the word ok."
 
 -- | The catalogue.extra entry for one model.
-entryFor :: Text -> Endpoint -> Backend -> Maybe Model -> Text -> Measured -> Value
-entryFor day ep b known name m =
+entryFor :: Text -> Endpoint -> Backend -> Maybe Model -> Text -> Maybe Text -> Measured -> Value
+entryFor day ep b known name fp m =
   Object (KeyMap.fromList (measuredFields <> descriptive))
   where
     decodeRate = fmap (\(n, s) -> fromIntegral n / s) m.decode :: Maybe Double
@@ -440,6 +508,7 @@ entryFor day ep b known name m =
       , ( "measured"
         , object
             [ "on" .= day
+            , "fingerprint" .= fp
             , "endpoint" .= endpointId ep
             , "engine" .= engineName b.engine
             , "window" .= m.window
@@ -521,20 +590,6 @@ report m = do
       )
   forM_ m.problems \p -> say ("  PROBLEM " <> p)
   when (null m.prefill && isNothing m.decode) (say "  nothing measured")
-
--- | The key a model's entry is written under: the served name without
--- ollama's ":latest".
---
--- ollama reports a model registered as "sully" as "sully:latest", while
--- the consumer declares it, and catalogue-check looks it up, as "sully".
--- lookupModel already treats the two as the same model when reading. The
--- first version of this program wrote the entry under the served name, so
--- a model the catalogue describes as "sully" gained a second, measured-only
--- entry under "sully:latest" with no summary, and llmq refused to load the
--- whole catalogue (2026-09-28). Writing under the stripped name merges the
--- measurement into the entry that already describes the model.
-catalogueKey :: Text -> Text
-catalogueKey t = maybe t id (T.stripSuffix ":latest" t)
 
 pathTo :: [Text] -> Value -> Maybe Value
 pathTo [] v = Just v

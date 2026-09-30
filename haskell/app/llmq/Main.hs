@@ -5,14 +5,14 @@
 -- part on disk, and resumes at the first unfinished part when run again.
 --
 -- The catalogue arrives as JSON in $OPEN_SLOP_CATALOGUE (Nix writes it from
--- catalogue/default.nix plus the consumer's endpoint options). Nothing here
--- knows an address.
+-- catalogue/default.nix plus the consumer's endpoint options), with the
+-- measurements in this machine's cache laid over it (OpenSlop.Measured).
+-- Nothing here knows an address.
 --
 -- Exit status: 0 done, 1 failed, 2 done with warnings, 130 interrupted.
 module Main (main) where
 
 import Control.Monad (forM_, unless, when)
-import Data.Aeson (eitherDecodeFileStrict)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -27,6 +27,7 @@ import OpenSlop.Catalogue
 import OpenSlop.Engine (Prompt (..), Summary (..), buildRequest)
 import OpenSlop.Http
 import OpenSlop.Job
+import OpenSlop.Measured (loadCatalogue)
 import OpenSlop.Stats (Stats (..), Verdict (..), judge)
 import System.Directory (getHomeDirectory)
 import System.Environment (lookupEnv)
@@ -112,7 +113,8 @@ main = do
   (common0, cmd) <-
     execParser (O.info (cmdP <**> helper) (fullDesc <> progDesc "llmq: send text to a local model, as a resumable job"))
   common <- fillDefaults common0
-  cat <- eitherDecodeFileStrict common.catalogueFile >>= either (die' . T.pack) pure
+  (cat, notes) <- loadCatalogue common.catalogueFile >>= either (die' . T.pack) pure
+  forM_ notes \n -> TIO.hPutStrLn stderr ("llmq: " <> n)
   client <- newClient
   auth <- case common.keyFile of
     Nothing -> pure NoAuth

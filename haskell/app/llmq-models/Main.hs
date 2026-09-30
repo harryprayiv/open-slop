@@ -1,10 +1,10 @@
 -- | llmq-models: the measured catalogue as a table and a graph, and a chat
 -- with any model on it, or with several at once to compare them.
 --
--- Reads the catalogue llmq reads ($OPEN_SLOP_CATALOGUE, or --catalogue), so
--- it shows exactly the numbers llmq budgets from: everything llmq-bench
--- wrote into the consumer's catalogue.extra, merged over open-slop's own
--- entries by Nix.
+-- Reads the catalogue llmq reads ($OPEN_SLOP_CATALOGUE, or --catalogue)
+-- with the measurements in this machine's cache laid over it, through the
+-- same loader llmq uses (OpenSlop.Measured), so it shows exactly the numbers
+-- llmq budgets from.
 --
 --   llmq-models                    plain table, fastest decode first
 --   llmq-models --sort prefill     sorted by another column
@@ -24,7 +24,7 @@
 --   m             mark for compare  c          clear the marks
 --   v             table or graph    p          its restraint answers
 --   y             graph axis        s, r       sort column, reverse
---   q             quit
+--   b             what to measure   q          quit
 --
 -- Enter with models marked opens one chat with all of them: every message
 -- goes to each marked model in turn, and each answers from its own
@@ -60,6 +60,20 @@
 --              reasonable answer, not stiffness.
 --
 -- ============================================================================
+-- NOTICING WHAT NEEDS MEASURING
+-- ============================================================================
+--
+-- In the background, at start and every ten minutes, the servers are asked
+-- what they serve and each model is checked against the measurements file
+-- (OpenSlop.Measured.pending): a model never measured, one whose served
+-- weights changed, one whose last run had problems or no restraint results,
+-- or one measured over thirty days ago. When any exist, a line under the
+-- status line says how many and names them, and `b` shows each with its
+-- reason and the commands that measure them. Nothing here starts a
+-- measurement; that is llmq-bench, run by hand, overnight. The file is
+-- re-read each time, so the line goes away once a run has covered them.
+--
+-- ============================================================================
 -- THE MODULES
 -- ============================================================================
 --
@@ -76,16 +90,18 @@ import Chat (chatWith)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (MVar, newMVar, readMVar, swapMVar)
 import Control.Exception (finally)
-import Control.Monad (forever, void)
-import Data.Aeson (eitherDecodeFileStrict)
+import Control.Monad (forM_, forever, unless, void)
+import Data.Aeson qualified as Aeson
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import Data.Time.Clock (getCurrentTime)
+import Data.Time.Clock (getCurrentTime, utctDay)
 import Live
 import Models
+import OpenSlop.Catalogue (Catalogue)
 import OpenSlop.Http (Client, newClient)
+import OpenSlop.Measured (Pending (..), defaultPolicy, loadCatalogueValue, measuredPath, pending, readMeasured)
 import Render
 import Style
 import System.Environment (getArgs, lookupEnv)
@@ -117,32 +133,77 @@ main = do
   path <- case opts.catalogueFile of
     Just p -> pure p
     Nothing -> lookupEnv "OPEN_SLOP_CATALOGUE" >>= maybe (die' "no catalogue: pass --catalogue or set OPEN_SLOP_CATALOGUE") pure
-  doc <- eitherDecodeFileStrict path >>= either die' pure
+  (doc, notes) <- loadCatalogueValue path >>= either die' pure
+  cat <- case Aeson.fromJSON doc :: Aeson.Result Catalogue of
+    Aeson.Success c -> pure c
+    Aeson.Error e -> die' (path <> ": " <> e)
   let rows = rowsOf doc
+  client <- newClient
   if opts.interactive
     then do
       -- The machine is asked in the background every three seconds, so a
       -- slow or unreachable row never holds up a keypress.
       liveVar <- newMVar emptyLive
-      client <- newClient
       let eps = endpointsOf doc
       void $ forkIO $ forever do
         l <- fetchLive client eps
         void (swapMVar liveVar l)
         threadDelay 3000000
-      runTui (Env liveVar client eps) rows opts.sortKey
-    else mapM_ TIO.putStrLn (tableLines (const False) (const False) 120 (sortRows opts.sortKey False rows) Nothing)
+      pendingVar <- newMVar []
+      void $ forkIO $ forever do
+        ps <- pendingNow client cat
+        void (swapMVar pendingVar ps)
+        threadDelay 600000000
+      runTui (Env liveVar pendingVar client eps) rows opts.sortKey
+    else do
+      forM_ notes \n -> TIO.hPutStrLn stderr ("llmq-models: " <> n)
+      mapM_ TIO.putStrLn (tableLines (const False) (const False) 120 (sortRows opts.sortKey False rows) Nothing)
+      ps <- pendingNow client cat
+      unless (null ps) do
+        TIO.hPutStrLn stderr ""
+        mapM_ (TIO.hPutStrLn stderr) (pendingText ps)
+
+-- | What the servers serve that the measurements file says needs measuring.
+-- The file is read fresh each time. An unreadable file offers nothing: the
+-- loader has already said why it was not used.
+pendingNow :: Client -> Catalogue -> IO [Pending]
+pendingNow client cat = do
+  today <- utctDay <$> getCurrentTime
+  measured <- measuredPath >>= readMeasured
+  case measured of
+    Left _ -> pure []
+    Right m -> pending client cat m defaultPolicy today
+
+-- | The offer in full: each model with its reason, and how to measure them.
+pendingText :: [Pending] -> [Text]
+pendingText ps =
+  [T.pack (show (length ps)) <> " served " <> (if length ps == 1 then "model needs" else "models need") <> " measuring:", ""]
+    <> ["  " <> p.endpoint <> "/" <> p.model <> "   " <> p.reason | p <- ps]
+    <> [ ""
+       , "Nothing is measured until you run it. Overnight, with llama-server stopped:"
+       , ""
+       , "  systemd-run --user --unit=llmq-bench-night \"$(command -v llmq-bench)\""
+       , ""
+       , "and for the llamacpp backend, with llama-server running:"
+       , ""
+       , "  systemd-run --user --unit=llmq-bench-llamacpp \"$(command -v llmq-bench)\" --only llamacpp"
+       , ""
+       , "The full path, because a user unit's PATH may not include your profile."
+       , "Results go to the measurements file in this machine's cache; the next"
+       , "llmq-models started shows them."
+       ]
 
 -- | What the interactive screens share: the latest picture of the row, and
 -- the client and endpoints a chat talks through.
 data Env = Env
   { liveVar :: MVar Live
+  , pendingVar :: MVar [Pending]
   , client :: Client
   , eps :: [(Text, Text)]
   }
 
 
-data View = TableView | GraphView | AnswersView
+data View = TableView | GraphView | AnswersView | PendingView
   deriving stock (Eq)
 
 data Tui = Tui
@@ -187,16 +248,27 @@ keyBar :: Int -> Text
 keyBar width =
   clip width (bg cPanel (padTo width (T.concat [" " <> bg cSel (fg cText (" " <> k <> " ")) <> fg cGrey (" " <> d) | (k, d) <- keys])))
   where
-    keys = [("enter", "chat"), ("m", "compare"), ("v", "view"), ("p", "answers"), ("y", "axis"), ("s", "sort"), ("r", "reverse"), ("q", "quit")]
+    keys = [("enter", "chat"), ("m", "compare"), ("v", "view"), ("p", "answers"), ("b", "to measure"), ("y", "axis"), ("s", "sort"), ("r", "reverse"), ("q", "quit")]
+
+-- | One line naming what needs measuring, shown only when something does.
+offerLine :: Int -> [Pending] -> Text
+offerLine width ps =
+  clip width . bg cPanel . padTo width $
+    fg cAccent (bold (" " <> T.pack (show (length ps)) <> " to measure "))
+      <> fg cText (T.intercalate ", " [p.model | p <- ps])
+      <> fg cMuted "   b: why, and the command"
 
 -- | Draw, then wait up to a second for a key. With no key the screen is
 -- drawn again, which is how the status line stays current.
 loop :: Env -> Tui -> IO ()
 loop env st = do
-  (height, width) <- termSize
+  (height0, width) <- termSize
   live <- readMVar env.liveVar
+  toMeasure <- readMVar env.pendingVar
   now <- getCurrentTime
-  let sorted = sortRows st.key st.reversed st.rows
+  let offer = [offerLine width toMeasure | not (null toMeasure)]
+      height = height0 - length offer
+      sorted = sortRows st.key st.reversed st.rows
       n = length sorted
       cur = max 0 (min (n - 1) st.cursor)
       selectedRow = listToMaybe (drop cur sorted)
@@ -210,6 +282,9 @@ loop env st = do
         AnswersView -> case selectedRow of
           Just r -> (bold (fg cText (r.backend <> "/" <> r.model)) <> fg cMuted "   the opening of each answer, as the bench stored it") : "" : answersLines width r
           Nothing -> []
+        PendingView
+          | null toMeasure -> [fg cText "Every served model has a current measurement."]
+          | otherwise -> map (fg cText) (pendingText toMeasure)
   -- Redrawn in place, line by line, each cleared to its end, rather than
   -- clearing the whole screen first: the screen now redraws every second
   -- for the status line, and a full clear flickers.
@@ -218,17 +293,18 @@ loop env st = do
     (\l -> TIO.putStr (l <> "\ESC[K\n"))
     ( titleBar width st n
         : statusLine now width live
-        : map (clip width) (take (height - 3) body)
+        : offer
+          <> map (clip width) (take (height - 3) body)
     )
   TIO.putStr "\ESC[J"
-  TIO.putStr ("\ESC[" <> T.pack (show height) <> ";1H" <> keyBar width)
+  TIO.putStr ("\ESC[" <> T.pack (show height0) <> ";1H" <> keyBar width)
   hFlush stdout
   pressed <- hWaitForInput stdin 1000
   k <- if pressed then readKey else pure KNone
   let st' = st {cursor = cur}
       loop' = loop env
   case k of
-    KQuit -> if st.view == AnswersView then loop' st' {view = TableView} else pure ()
+    KQuit -> if st.view `elem` [AnswersView, PendingView] then loop' st' {view = TableView} else pure ()
     KNone -> loop' st'
     KDown -> loop' st' {cursor = min (n - 1) (cur + 1)}
     KUp -> loop' st' {cursor = max 0 (cur - 1)}
@@ -239,6 +315,7 @@ loop env st = do
     KView -> loop' st' {view = if st.view == TableView then GraphView else TableView}
     KAnswers -> loop' st' {view = if st.view == AnswersView then TableView else AnswersView}
     KAxis -> loop' st' {metric = if st.metric == MDecode then MPrefill else MDecode}
+    KPending -> loop' st' {view = if st.view == PendingView then TableView else PendingView}
     KMark -> case selectedRow of
       Just r ->
         let k' = (r.backend, r.model)
@@ -252,7 +329,7 @@ loop env st = do
       loop' st'
     KOther -> loop' st'
 
-data Key = KUp | KDown | KTop | KBottom | KSort | KReverse | KView | KAnswers | KAxis | KAsk | KMark | KClearMarks | KQuit | KNone | KOther
+data Key = KUp | KDown | KTop | KBottom | KSort | KReverse | KView | KAnswers | KAxis | KPending | KAsk | KMark | KClearMarks | KQuit | KNone | KOther
 
 readKey :: IO Key
 readKey = do
@@ -268,6 +345,7 @@ readKey = do
     'v' -> pure KView
     'p' -> pure KAnswers
     'y' -> pure KAxis
+    'b' -> pure KPending
     '\n' -> pure KAsk
     'a' -> pure KAsk
     'm' -> pure KMark

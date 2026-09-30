@@ -13,10 +13,11 @@
 # NO CATALOGUE ENTRY and gives it the backend's default budget. Refusing to
 # deploy the inference box because a client-side description is missing would
 # couple the server to its documentation. So it warns until the entry exists,
-# and the fix is to measure the model with llmq-bench and import the result
-# as services.open-slop.catalogue.extra in the consumer's configuration.
-# Which models a machine runs, and what is known about them, belong to the
-# consumer, not to open-slop.
+# and the fix is to describe the model in services.open-slop.catalogue.extra
+# in the consumer's configuration. Which models a machine runs, and what is
+# known about them, belong to the consumer, not to open-slop. What a model
+# measures at belongs to neither configuration: llmq-bench keeps it in the
+# cache of the client that ran it (OpenSlop.Measured).
 #
 # ============================================================================
 # WHY THE HAILO PORT IS PINNED BY A LITERAL
@@ -107,14 +108,14 @@ in
         ${host} declares ${backend} models with no entry in the catalogue:
         ${lib.concatStringsSep ", " missing}
 
-        They are served as normal. llmq lists them as NO CATALOGUE ENTRY, with
-        the ${backend} backend's default budget and no description of what
-        they cost. Measure them from a client that can reach this row:
+        They are served as normal. Describe each in this row's
+        services.open-slop.catalogue.extra (summary, docFit, licence, blurb),
+        which is what a person knows about a model and the only part of the
+        catalogue that belongs in configuration.
 
-          llmq-bench --only ${backend} -o <consumer repo>/llm/catalogue.json
-
-        and import that file in this row's configuration as
-        services.open-slop.catalogue.extra = lib.importJSON ./path/to/catalogue.json;
+        Their numbers do not go here. llmq-bench, run by hand on a client that
+        can reach this row, keeps them in that client's cache, and llmq-models
+        there names every served model that has not been measured yet.
       ''
     ) (lib.attrNames declared);
   };
