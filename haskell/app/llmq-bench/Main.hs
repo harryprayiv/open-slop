@@ -80,8 +80,9 @@
 -- the night that showed it). Every timed request waits for an idle machine
 -- under --cool-to degrees first, so every trial starts from the same
 -- state, and every trial is labelled burst or sustained by the clock it
--- actually ran at. Pacing costs wall-clock time, several minutes per long
--- trial on bare cooling; with a cooler most waits end at once.
+-- actually ran at, which on a Pi is the firmware's clock, not cpufreq's.
+-- Pacing costs wall-clock time, several minutes per long trial on bare
+-- cooling; with a cooler most waits end at once.
 --
 -- ============================================================================
 -- THE NUMBERS FOR A DECISION
@@ -101,7 +102,7 @@
 -- llmq-models already read, as medians of each size's headline regime.
 module Main (main) where
 
-import Conditions (Sampler, observed, startSampler)
+import Conditions (Sampler, startSampler, telemetryStatus)
 import Control
 import Control.Concurrent (myThreadId, threadDelay, throwTo)
 import Control.Exception (AsyncException (UserInterrupt), finally)
@@ -366,9 +367,7 @@ runPreflight o client cat ctl samplers llamaEps = do
             | b.engine == LlamaServer && isJust ctl -> Right "not running now; the run starts it"
             | otherwise -> Left (describeFailure f)
   threadDelay 5000000
-  forM_ (Map.toList samplers) \(h, s) -> check ("telemetry " <> h <> ":9100") do
-    seen <- observed s
-    pure (if seen then Right "" else Left "no node exporter answer; trials cannot be checked for contention or throttling")
+  forM_ (Map.toList samplers) \(h, s) -> check ("telemetry " <> h <> ":9100") (telemetryStatus s)
   case ctl of
     Nothing -> TIO.putStrLn "--    no --control: llama-server is not switched, loads are not measured from disk, llama-server's start is not timed"
     Just c -> do
