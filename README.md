@@ -408,7 +408,7 @@ The usual confusion is between the chat and Grace. The chat in `llmq-models` is 
 6. [llmq-claims](06-llmq-claims.md): evidence-checked claims.
 7. [open-slop-gateway](07-gateway.md): the authenticated endpoint.
 8. [llmq-grace](08-llmq-grace.md): typed Grace stages.
-9. [llmq-index](09-llmq-index.md): asking questions of your own files, alone or as a conversation, and how it compares with private-gpt.
+9. [llmq-index](docs/manual/09-llmq-index.md): asking questions of your own files, alone or as a conversation, and how it compares with private-gpt.
 10. [Files, variables and exit codes](10-reference.md): one place for every path and variable.
 11. [Troubleshooting and known quirks](11-troubleshooting.md).
 12. [Capacity](12-capacity.md): how every program works out how much a model can take, from the server, the benchmark and the catalogue, and why answers are not capped.
