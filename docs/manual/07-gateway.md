@@ -45,7 +45,7 @@ Refused with 400: `stream: true`, `n` other than 1, tools and function calling, 
 
 ## What is checked before the backend is called
 
-- The output budget must be at least 1 and less than the window.
+- A client's `max_tokens` must be at least 1 and less than the window. Without one, the answer is not capped (ollama gets `num_predict: -2`, llama-server no `max_tokens`), and the catalogue's `predict` is only the room kept free when checking the input size.
 - The total size of the messages must fit `floor((ctx - predict) * charsPerToken)` bytes, or the request is refused with `context_length_exceeded`.
 - A JSON response format sent to hailo-ollama is refused with `response_format_unsupported`. So is a conversation with assistant turns.
 

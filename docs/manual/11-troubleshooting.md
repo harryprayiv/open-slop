@@ -47,3 +47,5 @@ These are behaviours the code has now that you may not expect. Each is a candida
 6. `llmq-claims` has no `LLMQ_KEY_FILE` fallback.
 7. `llmq-models` names the backends `cpu`, `hailo` and `llamacpp` in its status line and chat, so renaming a backend in the catalogue breaks those parts.
 8. The chat in `llmq-models` does not show a reasoning model's thinking, but counts its tokens in the rate when the server reports them.
+9. `llmq run` and the gateway size input from the catalogue's budget, not from the measured capacity. For llmq run this keeps a job's id stable between runs; for the gateway it is not yet done.
+10. llama-server reports prompt counts that exclude its cached prefix, so the chat does not learn characters per token from llama-server answers; it uses the benchmark's figure.

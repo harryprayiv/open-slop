@@ -79,7 +79,7 @@ judge budget partIx bytes wall info
         , serverTruncated = info.serverTruncated
         , warnings =
             concat
-              [ ["output hit the " <> tshow budget.predict <> "-token cap and stops mid-thought" | info.hitLimit]
+              [ ["output filled the window and stops mid-thought" | info.hitLimit]
               , [ "the prompt took " <> tshow p <> " tokens, past the " <> tshow (budget.ctx - budget.predict) <> " left after the output reservation"
                 | Just p <- [info.promptTokens]
                 , p > budget.ctx - budget.predict

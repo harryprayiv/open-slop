@@ -393,7 +393,7 @@ The project has one library and seven programs. They differ in how you talk to t
 | Extract claims about each file in a dump, each one checked against quoted evidence | `llmq-claims` | One schema-constrained request per file, verified by code |
 | Get output whose shape is a Haskell type, checked before your code sees it | `llmq-grace` | Typed Grace stage per part, through the gateway |
 | Give other programs and machines one authenticated OpenAI-style endpoint | `open-slop-gateway` | Server, refuses requests that cannot fit or cannot be honoured |
-| Ask questions of your own files, with citations | `llmq-index` | Embeddings plus retrieval plus a cited answer |
+| Ask questions of your own files, one at a time or as a stored conversation, with citations | `llmq-index` | Embeddings, hybrid retrieval, packing sources to the model's capacity, a streamed cited answer |
 | Measure what each model costs on the machine that serves it | `llmq-bench` | Benchmark, run by hand, results kept in your cache |
 
 The usual confusion is between the chat and Grace. The chat in `llmq-models` is conversation: you type, the model answers, nothing is checked. `llmq-grace` is a batch pipeline: a Grace program declares the type of the answer, the server is forced to produce JSON of that shape, and Grace checks it before it is written. Use the chat to explore and compare. Use Grace when a program depends on the answer.
@@ -408,9 +408,10 @@ The usual confusion is between the chat and Grace. The chat in `llmq-models` is 
 6. [llmq-claims](06-llmq-claims.md): evidence-checked claims.
 7. [open-slop-gateway](07-gateway.md): the authenticated endpoint.
 8. [llmq-grace](08-llmq-grace.md): typed Grace stages.
-9. [llmq-index](09-llmq-index.md): asking questions of your own files.
+9. [llmq-index](09-llmq-index.md): asking questions of your own files, alone or as a conversation, and how it compares with private-gpt.
 10. [Files, variables and exit codes](10-reference.md): one place for every path and variable.
 11. [Troubleshooting and known quirks](11-troubleshooting.md).
+12. [Capacity](12-capacity.md): how every program works out how much a model can take, from the server, the benchmark and the catalogue, and why answers are not capped.
 
 ## Words used throughout
 

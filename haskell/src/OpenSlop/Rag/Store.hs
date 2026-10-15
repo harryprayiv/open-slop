@@ -33,16 +33,27 @@ module OpenSlop.Rag.Store
   , prune
   , Stats (..)
   , stats
+  , DocInfo (..)
+  , listDocuments
+  , forgetDocument
+  , SessionInfo (..)
+  , openSession
+  , listSessions
+  , sessionTurns
+  , addTurn
   ) where
 
 import Control.Monad (forM_, void)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString.Base16 qualified as B16
+import Data.Aeson (Value)
 import Data.Int (Int64)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Time (UTCTime)
+import Database.PostgreSQL.Simple.Types (PGArray (..))
 import Database.PostgreSQL.Simple
   ( Connection
   , Only (..)
@@ -53,6 +64,7 @@ import Database.PostgreSQL.Simple
   , query
   , query_
   , withTransaction
+  , (:.) (..)
   )
 import OpenSlop.Rag.Embed (vectorLiteral)
 import OpenSlop.Rag.Split (Piece (..))
@@ -97,6 +109,21 @@ schema =
     \ , PRIMARY KEY (chunk_id, model)\
     \ )"
   , "CREATE INDEX IF NOT EXISTS rag_embeddings_model ON rag_embeddings (model)"
+  , "CREATE TABLE IF NOT EXISTS rag_sessions\
+    \ ( id bigserial PRIMARY KEY\
+    \ , name text NOT NULL UNIQUE\
+    \ , created timestamptz NOT NULL DEFAULT now()\
+    \ )"
+  , "CREATE TABLE IF NOT EXISTS rag_turns\
+    \ ( id bigserial PRIMARY KEY\
+    \ , session_id bigint NOT NULL REFERENCES rag_sessions (id) ON DELETE CASCADE\
+    \ , role text NOT NULL CHECK (role IN ('user', 'assistant'))\
+    \ , content text NOT NULL\
+    \ , sources jsonb\
+    \ , model text\
+    \ , created timestamptz NOT NULL DEFAULT now()\
+    \ )"
+  , "CREATE INDEX IF NOT EXISTS rag_turns_session ON rag_turns (session_id, id)"
   ]
 
 migrate :: Connection -> IO (Either Text ())
@@ -222,8 +249,12 @@ data Hit = Hit
 -- cover density, not all of them: a question is phrased in words the
 -- answer does not use ("what port does it use"), and requiring every word
 -- would leave this half empty for most questions.
-search :: Connection -> Text -> [Double] -> Text -> Int -> Int -> IO [Hit]
-search conn model qvec qtext depth limit = do
+--
+-- A non-empty scope keeps only documents whose path starts with one of the
+-- given prefixes, in both halves, so the candidates are drawn from the
+-- scope rather than filtered out of the whole index afterwards.
+search :: Connection -> Text -> [Double] -> Text -> [Text] -> Int -> Int -> IO [Hit]
+search conn model qvec qtext scope depth limit = do
   let dims = length qvec
       d = T.pack (show dims)
       dist = "e.embedding::vector(" <> d <> ") <=> ?::vector(" <> d <> ")"
@@ -232,16 +263,21 @@ search conn model qvec qtext depth limit = do
         \  SELECT c.id, row_number() OVER (ORDER BY "
           <> dist
           <> ") AS r FROM rag_embeddings e JOIN rag_chunks c ON c.id = e.chunk_id\
+             \  JOIN rag_documents sd ON sd.id = c.document_id\
              \  WHERE e.model = ? AND e.dims = "
           <> d
+          <> scoped "sd"
           <> " ORDER BY "
           <> dist
           <> " LIMIT ?),\
              \ k AS (\
              \  SELECT c.id, row_number() OVER (ORDER BY ts_rank_cd(c.tsv, w.q) DESC) AS r\
-             \  FROM rag_chunks c,\
-             \   (SELECT replace(plainto_tsquery('english', ?)::text, '&', '|')::tsquery AS q) w\
-             \  WHERE c.tsv @@ w.q ORDER BY ts_rank_cd(c.tsv, w.q) DESC LIMIT ?),\
+             \  FROM (SELECT replace(plainto_tsquery('english', ?)::text, '&', '|')::tsquery AS q) w\
+             \  CROSS JOIN rag_chunks c\
+             \  JOIN rag_documents kd ON kd.id = c.document_id\
+             \  WHERE c.tsv @@ w.q"
+          <> scoped "kd"
+          <> " ORDER BY ts_rank_cd(c.tsv, w.q) DESC LIMIT ?),\
              \ f AS (\
              \  SELECT id, sum(1.0 / (60 + r))::float8 AS score,\
              \   bool_or(src = 'v') AS via_v, bool_or(src = 'k') AS via_k\
@@ -250,7 +286,14 @@ search conn model qvec qtext depth limit = do
              \ FROM f JOIN rag_chunks c ON c.id = f.id JOIN rag_documents d ON d.id = c.document_id\
              \ ORDER BY f.score DESC, d.path, c.ordinal LIMIT ?"
       lit = vectorLiteral qvec
-  rows <- query conn (fromString (T.unpack sql)) (lit, model, lit, depth, qtext, depth, limit)
+      patterns = PGArray (map likePrefix scope)
+      scoped alias
+        | null scope = ""
+        | otherwise = " AND " <> alias <> ".path LIKE ANY (?)"
+  rows <-
+    if null scope
+      then query conn (fromString (T.unpack sql)) (lit, model, lit, depth, qtext, depth, limit)
+      else query conn (fromString (T.unpack sql)) ((lit, model, patterns, lit, depth, qtext) :. (patterns, depth, limit))
   pure [Hit p h b lf lt s vv vk | (p, h, b, lf, lt, s, vv, vk) <- rows]
 
 -- | Remove one model's vectors, or every document under a root.
@@ -273,3 +316,78 @@ stats conn = do
   byModel <- query_ conn "SELECT model, dims, count(*) FROM rag_embeddings GROUP BY model, dims ORDER BY model"
   roots <- query_ conn "SELECT root, count(*) FROM rag_documents GROUP BY root ORDER BY root"
   pure Stats {documents, chunks, byModel, roots}
+
+-- | A path prefix as a LIKE pattern, with LIKE's own wildcards escaped.
+likePrefix :: Text -> Text
+likePrefix p = T.concatMap esc p <> "%"
+  where
+    esc c
+      | c `elem` ['%', '_', '\\'] = T.pack ['\\', c]
+      | otherwise = T.singleton c
+
+data DocInfo = DocInfo
+  { path :: Text
+  , kind :: Text
+  , bytes :: Int64
+  , chunks :: Int64
+  , ingestedAt :: UTCTime
+  }
+
+-- | The indexed documents, optionally only those under the given prefixes,
+-- in path order.
+listDocuments :: Connection -> [Text] -> IO [DocInfo]
+listDocuments conn scope = do
+  rows <-
+    if null scope
+      then query_ conn (fromString (docSql ""))
+      else query conn (fromString (docSql " WHERE d.path LIKE ANY (?)")) (Only (PGArray (map likePrefix scope)))
+  pure [DocInfo p k b n t | (p, k, b, n, t) <- rows]
+  where
+    docSql w =
+      "SELECT d.path, d.kind, d.bytes, (SELECT count(*) FROM rag_chunks c WHERE c.document_id = d.id), d.ingested_at\
+      \ FROM rag_documents d"
+        <> w
+        <> " ORDER BY d.path"
+
+-- | Remove one document, its chunks and its vectors. Returns whether it
+-- was there.
+forgetDocument :: Connection -> Text -> IO Bool
+forgetDocument conn p = (> 0) <$> execute conn "DELETE FROM rag_documents WHERE path = ?" (Only p)
+
+data SessionInfo = SessionInfo
+  { sessionId :: Int64
+  , name :: Text
+  , created :: UTCTime
+  , turns :: Int64
+  }
+
+-- | The session with this name, created if it does not exist.
+openSession :: Connection -> Text -> IO Int64
+openSession conn n = do
+  [Only i] <-
+    query
+      conn
+      "INSERT INTO rag_sessions (name) VALUES (?) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id"
+      (Only n)
+  pure i
+
+listSessions :: Connection -> IO [SessionInfo]
+listSessions conn = do
+  rows <-
+    query_
+      conn
+      "SELECT s.id, s.name, s.created, (SELECT count(*) FROM rag_turns t WHERE t.session_id = s.id)\
+      \ FROM rag_sessions s ORDER BY s.created"
+  pure [SessionInfo i n c t | (i, n, c, t) <- rows]
+
+-- | The session's turns in order, as (role, content).
+sessionTurns :: Connection -> Int64 -> IO [(Text, Text)]
+sessionTurns conn sid = query conn "SELECT role, content FROM rag_turns WHERE session_id = ? ORDER BY id" (Only sid)
+
+addTurn :: Connection -> Int64 -> Text -> Text -> Maybe Value -> Maybe Text -> IO ()
+addTurn conn sid role content sources model =
+  void $
+    execute
+      conn
+      "INSERT INTO rag_turns (session_id, role, content, sources, model) VALUES (?,?,?,?,?)"
+      (sid, role, content, sources, model)

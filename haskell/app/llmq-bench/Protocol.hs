@@ -100,6 +100,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
+import OpenSlop.Capacity (probeWindow)
 import OpenSlop.Catalogue
 import OpenSlop.Http
 import OpenSlop.Measured (currentProtocol)
@@ -163,6 +164,8 @@ measureModel cfg tg = do
   tStart <- now
   problemsRef <- newIORef []
   earlyRef <- newIORef (Map.empty :: Map.Map Int [Int])
+  -- characters per prompt token, one per grid trial the server counted
+  cptRef <- newIORef ([] :: [Double])
   let problem t = say ("  PROBLEM " <> t) >> modifyIORef' problemsRef (<> [t])
       eng = tg.backend.engine
 
@@ -174,7 +177,7 @@ measureModel cfg tg = do
 
   -- 2. facts and window
   facts <- factsOf cfg.client tg
-  trained <- windowOf cfg.client tg
+  trained <- probeWindow cfg.client tg.backend.engine tg.ep.url tg.name
   let window = case (trained, tg.numCtx) of
         (Just t, Just c) -> Just (min t c)
         (t, c) -> maybe t Just c
@@ -278,10 +281,13 @@ measureModel cfg tg = do
             then pure ()
             else do
               k <- atomicModifyIORef' counter (\c -> (c + 1, c + 1))
-              r <- paced (Request (filler tg.backend s ("grid " <> T.pack (show k) <> " " <> T.pack (show t))) cfg.outTokens False tg.numCtx)
+              let prompt = filler tg.backend s ("grid " <> T.pack (show k) <> " " <> T.pack (show t))
+              r <- paced (Request prompt cfg.outTokens False tg.numCtx)
               case r of
                 Left e -> problem (T.pack (show s) <> "-token prompt: " <> e)
                 Right j -> do
+                  forM_ j.trial.promptTokens \pt ->
+                    when (pt > 0) $ modifyIORef' cptRef (fromIntegral (T.length prompt) / fromIntegral pt :)
                   forM_ j.trial.promptTokens \pt ->
                     when (fromIntegral pt < 0.8 * (fromIntegral s :: Double)) $
                       problem (T.pack (printf "%d-token prompt: the server read only %d tokens of it" s pt))
@@ -474,11 +480,14 @@ measureModel cfg tg = do
     )
   forM_ observations \o -> say ("  observed: " <> o)
   when (tGrid - tStart > cfg.budgetSecs) (problem "the load measurements alone used the whole time budget")
+  cptMedian <- median <$> readIORef cptRef
   pure
     Result
       { tokPerSec = r2 <$> shallowDecode
       , measured =
           [ ("window", toJSON window)
+          , ("charsPerToken", toJSON (fmap (\c -> fromIntegral (round (c * 1000) :: Integer) / 1000 :: Double) cptMedian))
+          , ("charsPerTokenBasis", String "median over the grid prompts, which are Haskell source with comments")
           , ("trainedWindow", toJSON trained)
           , ("numCtx", toJSON tg.numCtx)
           , ( "protocol"
@@ -706,26 +715,6 @@ factsOf client tg = case tg.backend.engine of
         , ("vocabulary",) . toJSON <$> (meta >>= intAt ["n_vocab"])
         ]
   HailoOllama -> pure []
-
--- | What the server says one request can hold: llama-server's n_ctx, the
--- model's trained context on ollama. hailo-ollama reports nothing, and its
--- window is 2,048 for every model in the zoo.
-windowOf :: Client -> Target -> IO (Maybe Int)
-windowOf client tg = case tg.backend.engine of
-  LlamaServer -> do
-    r <- getBody client NoAuth (tg.ep.url <> "/props") 15
-    pure (either (const Nothing) (\body -> Aeson.decode body >>= intAt ["default_generation_settings", "n_ctx"]) r)
-  Ollama -> do
-    r <- postJsonWithin (Just 15) client NoAuth tg.ep.url "/api/show" (object ["model" .= tg.name])
-    pure case r of
-      Left _ -> Nothing
-      Right body -> do
-        v <- Aeson.decode body
-        Object mi <- pathTo ["model_info"] v
-        case [n | (k, Number n) <- KeyMap.toList mi, ".context_length" `T.isSuffixOf` Key.toText k] of
-          (n : _) -> Just (round (toRealFloat n :: Double))
-          [] -> Nothing
-  HailoOllama -> pure (Just 2048)
 
 pathTo :: [Text] -> Value -> Maybe Value
 pathTo [] v = Just v

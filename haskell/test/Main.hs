@@ -9,6 +9,7 @@ import Data.Char (isSpace)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
+import OpenSlop.Capacity (Capacity (..), CptSource (..), WindowSource (..), answerRoom, capacityFor, learn, promptChars, promptCharsWithin)
 import OpenSlop.Catalogue
 import OpenSlop.Chunk (Mode (..), Part (..), chunk, chunkWith, reassemble)
 import OpenSlop.Gateway.Keys (authorise, parseKeys)
@@ -57,6 +58,14 @@ main =
           , testCase "hosts are read out of URLs" hosts
           , testCase "only LAN hosts are private" locality
           , testCase "citations are read back out of a reply" citations
+          ]
+      , testGroup
+          "capacity"
+          [ testCase "llama-server's allocated window is the window" capLlama
+          , testCase "ollama gets the trained context within the catalogue's limit" capOllama
+          , testCase "a measured chars-per-token replaces the catalogue's guess" capMeasured
+          , testCase "learning ignores counts far from the current figure" capLearn
+          , testCase "a time budget shrinks the prompt by the measured prefill rate" capWait
           ]
       ]
 
@@ -342,3 +351,42 @@ citations :: Assertion
 citations = do
   citedSources "It is in [2] and [1, 3]; see also [link] and [12]." @?= [1, 2, 3, 12]
   citedSources "no sources" @?= []
+
+-- ---------------------------------------------------------------------------
+-- capacity
+
+capLlama :: Assertion
+capLlama = do
+  let c = capacityFor (mkBackend LlamaServer 16384 2048) Nothing Nothing (Just 131072)
+  (c.window, c.windowSource) @?= (131072, ServerAllocated)
+
+capOllama :: Assertion
+capOllama = do
+  let b = mkBackend Ollama 16384 2048
+  (capacityFor b Nothing Nothing (Just 131072)).window @?= 16384
+  (capacityFor b Nothing Nothing (Just 4096)).window @?= 4096
+  (capacityFor b Nothing Nothing Nothing).windowSource @?= ConfiguredOnly
+  let big = Model {summary = "", docFit = Unknown, ctx = Just 65536, predict = Nothing, tokPerSec = Nothing, licence = "", blurb = ""}
+  (capacityFor b (Just big) Nothing (Just 131072)).window @?= 65536
+
+capMeasured :: Assertion
+capMeasured = do
+  let m = object ["charsPerToken" .= (3.9 :: Double)]
+      c = capacityFor (mkBackend Ollama 16384 2048) Nothing (Just m) (Just 32768)
+  (c.charsPerToken, c.cptSource) @?= (3.9, Benchmarked)
+
+capLearn :: Assertion
+capLearn = do
+  let c = capacityFor (mkBackend Ollama 16384 2048) Nothing Nothing (Just 32768)
+  (learn c 4000 1000).cptSource @?= Learned
+  (learn c 4000 1000).charsPerToken @?= 4.0
+  -- a cached prefix makes the count look tiny: ignored
+  (learn c 40000 1000).charsPerToken @?= 2.8
+
+capWait :: Assertion
+capWait = do
+  let m = object ["prefill" .= [object ["promptTokens" .= (4096 :: Int), "tokPerSec" .= (20 :: Double)]]]
+      c = capacityFor (mkBackend Ollama 16384 2048) Nothing (Just m) (Just 32768)
+  answerRoom c @?= 4096
+  promptCharsWithin c 0 (Just 10) @?= floor (10 * 20 * 2.8 :: Double)
+  promptCharsWithin c 0 Nothing @?= promptChars c 0

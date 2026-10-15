@@ -26,7 +26,7 @@
 | `~/.local/state/llmq/<id>/` | llmq, llmq-grace | Jobs. See [llmq](03-llmq.md). |
 | `~/.local/state/open-slop/chats/*.md` | llmq-models | Chat transcripts. |
 | `claims-out/` | llmq-claims | Claims per file and `claims.md`. |
-| Postgres `llmq_rag` | llmq-index | Tables `rag_documents`, `rag_chunks`, `rag_embeddings`. |
+| Postgres `llmq_rag` | llmq-index | Tables `rag_documents`, `rag_chunks`, `rag_embeddings`, `rag_sessions`, `rag_turns`. |
 | `/var/lib/private/ollama` | ollama | Weights. |
 | `/var/lib/hailo-ollama` | hailo-ollama | Zoo data and weights. |
 

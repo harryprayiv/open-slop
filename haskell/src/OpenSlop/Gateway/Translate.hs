@@ -61,7 +61,8 @@ data Call = Call
   { path :: ByteString
   , body :: Value
   , predict :: Int
-  -- ^ the output cap actually sent
+  -- ^ the room reserved for the answer: the client's max_tokens, else the
+  -- catalogue's predict. Only a client's max_tokens is sent as a cap.
   }
   deriving stock (Show)
 
@@ -101,7 +102,7 @@ plan t r = do
                   , "stream" .= False
                   , "options"
                       .= object
-                        ( ["num_ctx" .= b.ctx, "num_predict" .= predict]
+                        ( ["num_ctx" .= b.ctx, "num_predict" .= fromMaybe (-2) r.maxTokens]
                             <> catMaybes [("temperature" .=) <$> temperature, ("seed" .=) <$> r.seed]
                         )
                   ]
@@ -120,7 +121,6 @@ plan t r = do
               object
                 ( [ "messages" .= r.messages
                   , "stream" .= False
-                  , "max_tokens" .= predict
                   , -- Measured 2026-09-26 on oracle: a 4,700-token prompt
                     -- prefills in 1.0 s warm against about 219 s cold, so a
                     -- client that sends the same bundle in front of many
@@ -132,6 +132,7 @@ plan t r = do
                       [ ("temperature" .=) <$> temperature
                       , ("seed" .=) <$> r.seed
                       , ("response_format" .=) . responseFormatValue <$> r.responseFormat
+                      , ("max_tokens" .=) <$> r.maxTokens
                       ]
                 )
           }

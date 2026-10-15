@@ -84,7 +84,7 @@ Every write is atomic, so an interruption never leaves a half-written part. Two 
 
 A part fails, and the job stops, when the server returns an error, nothing, malformed JSON, only whitespace, or no answer within `--timeout`, or when the prompt filled the window (the server reported truncation, or prompt tokens reached ctx minus 16). A failure that is not caused by the window can be resumed with `llmq -r ID`. A window failure will fail again with the same parts; start a new job with a smaller `--chunk-bytes`.
 
-A part is kept with a warning when the answer hit the output cap, the prompt ate into the output reserve, prompt plus output exceeded the window, the text tokenised much denser than the catalogue assumes, or a file that starts in the part has no `##` heading naming it.
+Answers are not capped: ollama is sent `num_predict: -2` and llama-server `n_predict: -1`, so an answer runs until the model stops or the window is full. The catalogue's `predict` is the room the budget keeps free for the answer when sizing parts, not a limit. A part is kept with a warning when the answer filled the window, the prompt ate into the output reserve, prompt plus output exceeded the window, the text tokenised much denser than the catalogue assumes, or a file that starts in the part has no `##` heading naming it.
 
 ### Long runs
 

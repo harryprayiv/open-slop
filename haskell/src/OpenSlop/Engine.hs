@@ -92,7 +92,10 @@ instance ToJSON Request where
           , "options"
               .= object
                 ( [ "num_ctx" .= sampling.ctx
-                  , "num_predict" .= sampling.predict
+                  , -- -2: the answer runs until the model stops or the
+                    -- context is full. sampling.predict is the room the
+                    -- budget reserved for it, not a cap.
+                    "num_predict" .= (-2 :: Int)
                   ]
                     <> maybe [] (\t -> ["temperature" .= t]) sampling.temperature
                     <> maybe [] (\s -> ["seed" .= s]) sampling.seed
@@ -111,7 +114,8 @@ instance ToJSON Request where
       object
         ( [ "prompt" .= joined prompt
           , "stream" .= stream
-          , "n_predict" .= sampling.predict
+          , -- -1: no cap; the answer ends at the model's stop or the window
+            "n_predict" .= (-1 :: Int)
           , "cache_prompt" .= True
           ]
             <> maybe [] (\t -> ["temperature" .= t]) sampling.temperature
@@ -133,7 +137,8 @@ data FinalInfo = FinalInfo
   , outputNs :: Maybe Double
   , loadNs :: Maybe Double
   , hitLimit :: Bool
-  -- ^ output stopped at the predict cap
+  -- ^ output stopped because the window filled (ollama's done_reason
+  -- "length", llama-server's stop_type "limit")
   , serverTruncated :: Bool
   -- ^ the server itself reported cutting the prompt (llama-server does)
   }

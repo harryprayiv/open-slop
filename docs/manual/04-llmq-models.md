@@ -65,7 +65,9 @@ Every 10 minutes, and at start, the screen asks each server what it serves and c
 
 ## Chat
 
-Enter opens a chat with the selected model, or with every marked model. With several models, each message goes to each model in turn, and each keeps its own history. The whole history is sent with every message, and the oldest messages are dropped when it would not fit the model's window.
+Enter opens a chat with the selected model, or with every marked model. With several models, each message goes to each model in turn, and each keeps its own history. The whole history is sent with every message, and the oldest messages are dropped when it would not fit the model's window less a quarter kept free for the answer.
+
+The chat opens with one line per model giving its capacity: the window its server reports (within the catalogue's limit for this hardware), its characters per token and where that figure came from, and its measured rates. See [Capacity](12-capacity.md). The characters per token are refined from the prompt counts ollama reports with each answer.
 
 ### Chat keys and commands
 
@@ -83,7 +85,7 @@ Enter opens a chat with the selected model, or with every marked model. With sev
 
 Mouse reporting is on, so hold Shift while dragging to select text.
 
-After each answer a line shows the total time, the wait for the first words, the token count and the rate. Each answer is limited to 512 tokens. Reasoning models show "thinking" until their visible answer starts; their reasoning text is not displayed.
+After each answer a line shows the total time, the wait for the first words, the token count and the rate. Answers are not capped: an answer runs until the model stops or the window is full, and ctrl-c stops it early, keeping what was written. Reasoning models show "thinking" until their visible answer starts; their reasoning text is not displayed.
 
 ### llama-server in a chat
 

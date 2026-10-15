@@ -91,14 +91,27 @@
 -- error on screen, not a password prompt hidden behind the chat.
 --
 -- ============================================================================
--- STAYING INSIDE THE WINDOW
+-- STAYING INSIDE THE WINDOW, AND NO CAP ON ANSWERS
 -- ============================================================================
 --
--- A history outgrows a model's window, the NPU's 2,048 tokens soonest. Before
+-- Each participant's capacity comes from OpenSlop.Capacity when the chat
+-- opens: the window its server reports (within the catalogue's limit for
+-- this hardware) and the characters per token llmq-bench measured. Before
 -- each turn the oldest messages are dropped until the history fits the
--- window less the reply budget, estimated with the backend's bytes per token,
--- and the screen says how many were dropped. Without that, ollama and
--- hailo-ollama would silently lose the front of the prompt instead.
+-- window less a quarter kept free for the answer, and the screen says how
+-- many were dropped. Without that, ollama and hailo-ollama would silently
+-- lose the front of the prompt instead.
+--
+-- Answers are not capped. ollama is sent num_predict -2, which lets the
+-- answer run until the model stops or the context is full; llama-server's
+-- chat route is sent no max_tokens; hailo-ollama, which has no such value,
+-- is given whatever its window leaves after the prompt. A long answer is
+-- stopped with ctrl-c, which keeps what was written.
+--
+-- Every ollama answer reports how many tokens the prompt was, and the
+-- characters per token are refined from that as the conversation goes, so
+-- a model nothing has measured still gets an accurate window after a turn
+-- or two.
 module Chat (chatWith) where
 
 import ChatScreen
@@ -122,6 +135,8 @@ import Data.Time (defaultTimeLocale, formatTime, getZonedTime)
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import Live (Live (..))
 import Models
+import OpenSlop.Capacity (Capacity (..), capacityFor, describeCapacity, learn, probeWindow, promptChars, unlimitedPredict)
+import OpenSlop.Catalogue (Backend (..), Engine (..))
 import OpenSlop.Http (Auth (..), Client, HttpFailure (..), describeFailure, getBody, postLines)
 import Render (statusLine)
 import Style
@@ -144,6 +159,7 @@ data Participant = Participant
   , history :: IORef [Turn]
   , hailoChat :: IORef Bool
   -- ^ whether hailo-ollama's /api/chat works; False after one refusal
+  , capacity :: IORef Capacity
   }
 
 -- | One colour per participant, in the order they were marked, chosen to be
@@ -151,16 +167,50 @@ data Participant = Participant
 participantColours :: [Int]
 participantColours = [215, 213, 80, 150, 75]
 
--- | Output tokens asked for per reply. Enough for a real answer; small
--- enough that a runaway model on a 2 tok/s backend stops within minutes.
-replyBudget :: Int
-replyBudget = 512
+-- | The engine a row's backend speaks, from the catalogue, falling back
+-- to the backend's usual name for a catalogue that did not decode.
+engineOf :: Row -> Engine
+engineOf r = case r.backendSpec of
+  Just b -> b.engine
+  Nothing -> case r.backend of
+    "llamacpp" -> LlamaServer
+    "hailo" -> HailoOllama
+    _ -> Ollama
+
+-- | The participant's capacity, asking its server for the window now. A
+-- llama-server that is not running yet reports nothing; its capacity is
+-- asked again once it answers (see 'refreshCapacity').
+capacityOf :: Client -> Row -> Text -> IO Capacity
+capacityOf client r url = do
+  served <- probeWindow client (engineOf r) url r.model
+  pure (capacityFor (fromMaybe fallback r.backendSpec) r.modelSpec r.measuredBlock served)
+  where
+    fallback =
+      Backend
+        { engine = engineOf r
+        , port = 0
+        , streams = True
+        , acceptsOptions = True
+        , ctx = fromMaybe 2048 r.window
+        , predict = 0
+        , promptOverhead = 0
+        , charsPerToken = r.charsPerToken
+        , temperature = Nothing
+        , blurb = ""
+        }
+
+refreshCapacity :: Participant -> IO ()
+refreshCapacity p = do
+  c <- capacityOf p.client p.row p.url
+  old <- readIORef p.capacity
+  -- keep what the session learned about characters per token
+  writeIORef p.capacity c {charsPerToken = old.charsPerToken, cptSource = old.cptSource}
 
 -- | Chat with the given models, each with the URL of its server, until the
 -- user leaves. Returns with the terminal as the model table left it.
 chatWith :: Client -> MVar Live -> [(Row, Text)] -> IO ()
 chatWith client liveVar targets = do
-  ps <- mapM (\((r, u), c) -> Participant r client u c <$> newIORef [] <*> newIORef True) (zip targets (cycle participantColours))
+  ps <- mapM (\((r, u), c) -> Participant r client u c <$> newIORef [] <*> newIORef True <*> (capacityOf client r u >>= newIORef)) (zip targets (cycle participantColours))
   (h, w) <- termSize
   scr <- openScreen h w
   file <- transcriptFile
@@ -174,6 +224,11 @@ chatWith client liveVar targets = do
   block scr cMuted (fg cGrey (if length ps > 1 then "each message goes to every model above, one after another" else "a conversation; the model sees everything said so far"))
   stream scr cMuted "esc returns to the models; ctrl-c stops an answer; pgup, pgdn, the arrows and the mouse wheel scroll, even while a model answers; end catches up; hold shift to select text with the mouse; /clear starts over"
   endBlock scr
+  forM_ ps \p -> do
+    c <- readIORef p.capacity
+    block scr p.colour (fg p.colour (p.row.backend <> "/" <> p.row.model))
+    stream scr cMuted (describeCapacity c <> "; answers are not capped")
+    endBlock scr
   let keys = keyBar w [("enter", "send"), ("esc", "back to models"), ("ctrl-c", "stop answer"), ("pgup", "scroll back"), ("/clear", "start over")] (T.pack (takeFileName file))
   startedHere <- newIORef False
   -- Start llama-server now if this chat needs it, so the model loads while
@@ -236,6 +291,7 @@ ensureUp scr keys startedHere p
               ok <- waitHealthy scr keys p t0
               unless ok $
                 note scr (fg cRed "llama-server did not come up within four minutes; its log on the host says why: journalctl -u llama-server")
+              when ok (refreshCapacity p)
               pure ok
 
 title :: Int -> [Participant] -> Text
@@ -313,13 +369,16 @@ answerTurn scr keys file p q = do
         stream scr cText t
         modifyIORef' answer (<> t)
         modifyIORef' tokens (+ 1)
+      sentChars = sum [T.length t.content + 16 | t <- msgs]
       handlers =
         Handlers
           onText
           (writeIORef reported . Just)
+          (\n -> modifyIORef' p.capacity (\c -> learn c sentChars n))
           (writeIORef failure . Just)
           (\t -> modifyMVar_ notes (pure . (<> [t])))
-  result <- try (send p msgs handlers) :: IO (Either AsyncException (Either Text ()))
+  cap <- readIORef p.capacity
+  result <- try (send p cap msgs handlers) :: IO (Either AsyncException (Either Text ()))
   killThread indicator
   endBlock scr
   finished <- getCurrentTime
@@ -493,14 +552,13 @@ record :: FilePath -> Text -> IO ()
 record = TIO.appendFile
 
 -- | Drop the oldest messages, keeping the newest, until the history fits
--- the window less the reply budget. Returns how many were dropped.
+-- the window less the room kept for the answer. Returns how many were
+-- dropped.
 fitWindow :: Participant -> IO Int
 fitWindow p = do
   msgs <- readIORef p.history
-  let window = case p.row.backend of
-        "hailo" -> 2048
-        _ -> min 16384 (fromMaybe 16384 p.row.window)
-      budget = floor (fromIntegral (window - replyBudget - 128) * p.row.charsPerToken) :: Int
+  c <- readIORef p.capacity
+  let budget = promptChars c 64
       size = sum . map (\t -> T.length t.content + 16)
       go ms n
         | size ms <= budget || length ms <= 1 = (ms, n)
@@ -512,6 +570,7 @@ fitWindow p = do
 data Handlers = Handlers
   { onText :: Text -> IO ()
   , onCount :: Int -> IO ()
+  , onPromptCount :: Int -> IO ()
   , onError :: Text -> IO ()
   , onNote :: Text -> IO ()
   -- ^ something worth saying about how the answer was obtained, shown
@@ -519,10 +578,10 @@ data Handlers = Handlers
   }
 
 -- | Send the history to the participant's server and stream the answer.
-send :: Participant -> [Turn] -> Handlers -> IO (Either Text ())
-send p msgs h = case p.row.backend of
-  "llamacpp" -> streamTo "/v1/chat/completions" openAI openAILine
-  "hailo" -> do
+send :: Participant -> Capacity -> [Turn] -> Handlers -> IO (Either Text ())
+send p cap msgs h = case engineOf p.row of
+  LlamaServer -> streamTo "/v1/chat/completions" openAI openAILine
+  HailoOllama -> do
     useChat <- readIORef p.hailoChat
     if useChat
       then do
@@ -543,6 +602,8 @@ send p msgs h = case p.row.backend of
         Left f -> Left (describeFailure f)
         Right () -> Right ()
     messages = [object ["role" .= t.role, "content" .= t.content] | t <- msgs]
+    promptTokens = ceiling (fromIntegral (sum [T.length t.content + 16 | t <- msgs]) / cap.charsPerToken) :: Int
+    predictOpt = [Key.fromText k .= v | Just (k, v) <- [unlimitedPredict (engineOf p.row) cap promptTokens]]
     ollamaChat =
       object
         [ "model" .= p.row.model
@@ -550,15 +611,14 @@ send p msgs h = case p.row.backend of
         , "stream" .= True
         , "options"
             .= object
-              ( ["num_predict" .= replyBudget]
-                  <> ["num_ctx" .= min 16384 (fromMaybe 16384 p.row.window) | p.row.backend == "cpu"]
+              ( predictOpt
+                  <> ["num_ctx" .= cap.window | engineOf p.row == Ollama]
               )
         ]
     openAI =
       object
         [ "messages" .= messages
         , "stream" .= True
-        , "max_tokens" .= replyBudget
         , "cache_prompt" .= True
         ]
     transcript =
@@ -569,7 +629,7 @@ send p msgs h = case p.row.backend of
                    <> "\n\nAssistant:"
                )
         , "stream" .= True
-        , "options" .= object ["num_predict" .= replyBudget]
+        , "options" .= object predictOpt
         ]
     withJson raw k = case decodeStrict (fromMaybe raw (B.stripPrefix "data: " raw)) of
       Just (Object o) -> case KeyMap.lookup "error" o of
@@ -579,8 +639,9 @@ send p msgs h = case p.row.backend of
       _ -> pure ()
     ollamaChatLine raw = withJson raw \o -> do
       forM_ (textAt ["message", "content"] (Object o)) h.onText
-      when (KeyMap.lookup "done" o == Just (Bool True)) $
+      when (KeyMap.lookup "done" o == Just (Bool True)) $ do
         forM_ (intAt ["eval_count"] (Object o)) h.onCount
+        forM_ (intAt ["prompt_eval_count"] (Object o)) h.onPromptCount
     generateLine raw = withJson raw \o -> do
       forM_ (textAt ["response"] (Object o)) h.onText
       when (KeyMap.lookup "done" o == Just (Bool True)) $

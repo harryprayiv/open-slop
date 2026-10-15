@@ -110,7 +110,7 @@ From the grid, per regime: time to first token as `a + b·k + c·k²` and decode
 
 ### What a measured entry holds
 
-Under `models.<backend>.<model>` the file holds `tokPerSec` and a `measured` block with: the date, fingerprint, endpoint, engine, window, protocol settings, load (from memory, from disk, server start, with warm-up), warm-up and overhead, prefill per size with every trial, decode by depth, the fitted predictions, prefix reuse and its speedup, warm prefill seconds, schema result, problems, observations (such as a model stopping early), facts, restraint, the conditions over the whole run, and the run's duration. Every statistic carries n, median, mean, standard deviation, coefficient of variation, 95% interval, quartiles, min, max and the samples.
+Under `models.<backend>.<model>` the file holds `tokPerSec` and a `measured` block with: the date, the model's characters per token (`charsPerToken`, the median over the grid prompts of characters sent divided by prompt tokens counted, which the other programs use to budget text for this model; see [Capacity](12-capacity.md)), fingerprint, endpoint, engine, window, protocol settings, load (from memory, from disk, server start, with warm-up), warm-up and overhead, prefill per size with every trial, decode by depth, the fitted predictions, prefix reuse and its speedup, warm prefill seconds, schema result, problems, observations (such as a model stopping early), facts, restraint, the conditions over the whole run, and the run's duration. Every statistic carries n, median, mean, standard deviation, coefficient of variation, 95% interval, quartiles, min, max and the samples.
 
 ## Re-judging refusals
 

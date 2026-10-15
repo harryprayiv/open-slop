@@ -14,7 +14,8 @@ mkDerivation {
   libraryHaskellDepends = [
     aeson base base16-bytestring bytestring containers
     cryptohash-sha256 directory filelock filepath http-client
-    http-client-tls http-types postgresql-simple text time wai
+    http-client-tls http-types postgresql-simple scientific text time
+    wai
   ];
   executableHaskellDepends = [
     aeson base base16-bytestring bytestring containers

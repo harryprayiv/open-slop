@@ -15,7 +15,7 @@ module Models
   , sortRows
   ) where
 
-import Data.Aeson (Value (..))
+import Data.Aeson (FromJSON, Result (..), Value (..), fromJSON)
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Char (isAlphaNum, isDigit, toLower)
@@ -25,6 +25,7 @@ import Data.Ord (Down (..), comparing)
 import Data.Scientific (toRealFloat)
 import Data.Text (Text)
 import Data.Text qualified as T
+import OpenSlop.Catalogue (Backend, Model)
 import Text.Read (readMaybe)
 
 data Probe = Probe
@@ -55,6 +56,10 @@ data Row = Row
   , problems :: [Text]
   , probes :: [Probe]
   , charsPerToken :: Double
+  , backendSpec :: Maybe Backend
+  -- ^ the catalogue's backend, decoded, for working out the model's capacity
+  , modelSpec :: Maybe Model
+  , measuredBlock :: Maybe Value
   }
 
 data Feel = Conversational | Readable | Batch | Unmeasured
@@ -83,7 +88,7 @@ stiffness r = case [p | p <- r.probes, p.name /= "opinion"] of
 
 rowsOf :: Value -> [Row]
 rowsOf doc =
-  [ rowOf (fromMaybe 3.5 (num ["backends", bk, "charsPerToken"] doc)) bk nm e
+  [ rowOf (fromMaybe 3.5 (num ["backends", bk, "charsPerToken"] doc)) (at ["backends", bk] doc >>= decoded) bk nm e
   | Just (Object backends) <- [at ["models"] doc]
   , (bkKey, Object ms) <- KeyMap.toList backends
   , (nmKey, e) <- KeyMap.toList ms
@@ -91,8 +96,13 @@ rowsOf doc =
   , let nm = Key.toText nmKey
   ]
 
-rowOf :: Double -> Text -> Text -> Value -> Row
-rowOf cpt bk nm e =
+decoded :: (FromJSON a) => Value -> Maybe a
+decoded v = case fromJSON v of
+  Success x -> Just x
+  Error _ -> Nothing
+
+rowOf :: Double -> Maybe Backend -> Text -> Text -> Value -> Row
+rowOf cpt spec bk nm e =
   Row
     { backend = bk
     , model = nm
@@ -120,6 +130,9 @@ rowOf cpt bk nm e =
         Just (Array xs) -> mapMaybe probeOf (foldr (:) [] xs)
         _ -> []
     , charsPerToken = cpt
+    , backendSpec = spec
+    , modelSpec = decoded e
+    , measuredBlock = at ["measured"] e
     }
   where
     largestPrefill = case at ["measured", "prefill"] e of
