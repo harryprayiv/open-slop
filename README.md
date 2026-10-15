@@ -418,3 +418,12 @@ The usual confusion is between the chat and Grace. The chat in `llmq-models` is 
 A row is a machine that serves models, such as oracle. A backend is one inference server on a row: `cpu` is ollama, `hailo` is hailo-ollama on the NPU, `llamacpp` is llama-server. An endpoint is a row and a backend together, written `row/backend`, for example `oracle/cpu`. A model id is `row/backend/name`, for example `oracle/cpu/qwen2.5-coder:7b`. Every program accepts any unique suffix of a model id, so `qwen2.5-coder:7b` works when only one server has it.
 
 The catalogue is the JSON description of the backends and models, built by Nix. The measurements file is `measured.json` in your cache, written by `llmq-bench` and laid over the catalogue when `llmq` and `llmq-models` read it.
+
+TODO:
+
+Still missing compared with private-gpt (also listed in the llmq-index page):
+
+- Streaming and a retrieval route on the gateway.
+- A web UI.
+- Tools, MCP and code execution.
+- Showing a reasoning model’s thinking separately.
