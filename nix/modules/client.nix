@@ -4,7 +4,8 @@
 # A home-manager module. The consumer says which rows serve which backends
 # and at what address; open-slop turns that plus the catalogue into the JSON
 # llmq reads, and wraps the binary so $OPEN_SLOP_CATALOGUE points at it and
-# $OPEN_SLOP_PROMPTS at the shipped prompts/ directory. Nothing
+# $OPEN_SLOP_PROMPTS at the shipped prompts/ directory. llmq-index also gets
+# pandoc and pdftotext by store path and its rag defaults. Nothing
 # in open-slop knows an address; every one comes from `endpoints` here.
 #
 # ============================================================================
@@ -45,6 +46,20 @@ let
     }
   );
 
+  # llmq-index's defaults, each only when set, so a flag or an exported
+  # variable still wins.
+  ragFlags = lib.concatStringsSep " " (
+    lib.mapAttrsToList (var: v: "--set-default ${var} ${lib.escapeShellArg v}") (
+      lib.filterAttrs (_: v: v != null) {
+        OPEN_SLOP_RAG_DB = cfg.rag.db;
+        OPEN_SLOP_RAG_EMBED_AT = cfg.rag.embedAt;
+        OPEN_SLOP_RAG_EMBED_MODEL = cfg.rag.embedModel;
+        OPEN_SLOP_RAG_CHAT_AT = cfg.rag.chatAt;
+        OPEN_SLOP_RAG_CHAT_MODEL = cfg.rag.chatModel;
+      }
+    )
+  );
+
   wrapped = pkgs.symlinkJoin {
     name = "llmq";
     paths = [ cfg.package ];
@@ -58,6 +73,9 @@ let
           --set-default OPEN_SLOP_CATALOGUE ${catalogueJson} \
           --set-default OPEN_SLOP_PROMPTS ${../../prompts} \
           --prefix PATH : ${lib.makeBinPath [ pkgs.fzf pkgs.xsel ]} \
+          --set-default OPEN_SLOP_PANDOC ${lib.getExe pkgs.pandoc} \
+          --set-default OPEN_SLOP_PDFTOTEXT ${lib.getBin pkgs.poppler-utils}/bin/pdftotext \
+          ${ragFlags} \
           ${lib.optionalString (cfg.keyFile != null) "--set-default LLMQ_KEY_FILE ${lib.escapeShellArg cfg.keyFile}"}
       done
     '';
@@ -98,6 +116,43 @@ in
       type = types.nullOr types.str;
       default = null;
       description = "Bearer key file for the gateway, once there is one. Unused until then.";
+    };
+
+    # llmq-index's defaults. The database is on whichever machine has
+    # services.open-slop.rag; llmq-index runs there and reaches it over the
+    # local socket. The servers are named row/backend, as llmq shows them,
+    # and must be in `endpoints` above.
+    rag = {
+      db = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "dbname=llmq_rag";
+        description = "libpq connection string. Unset means dbname=llmq_rag on the local socket.";
+      };
+      embedAt = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "oracle/cpu";
+        description = "The endpoint that embeds chunks and questions.";
+      };
+      embedModel = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "nomic-embed-text";
+        description = "Embedding model. Changing it means re-ingesting; the old vectors stay until llmq-index prune --model.";
+      };
+      chatAt = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "oracle/cpu";
+        description = "The endpoint llmq-index ask sends sources and the question to.";
+      };
+      chatModel = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "qwen2.5:7b";
+        description = "Chat model for llmq-index ask.";
+      };
     };
 
     catalogue.extra = lib.mkOption {

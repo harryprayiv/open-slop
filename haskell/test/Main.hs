@@ -5,6 +5,7 @@ import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy.Char8 qualified as BLC
+import Data.Char (isSpace)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -14,6 +15,9 @@ import OpenSlop.Gateway.Keys (authorise, parseKeys)
 import OpenSlop.Gateway.Route (Target, resolveTarget, targetId)
 import OpenSlop.Gateway.Translate (Call (..), Reply (..), parseBackendReply, plan)
 import OpenSlop.OpenAI
+import OpenSlop.Rag.Locality (hostOf, privateHost)
+import OpenSlop.Rag.Retrieve (citedSources)
+import OpenSlop.Rag.Split (Piece (..), SplitConfig (SplitConfig), split)
 import Test.Tasty
 import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck
@@ -42,6 +46,17 @@ main =
           , testCase "model ids resolve by unique suffix" resolution
           , testCase "backend replies parse per engine" replies
           , testCase "keys authorise by bearer token" keysAuth
+          ]
+      , testGroup
+          "rag"
+          [ testProperty "no chunk exceeds the hard limit" prop_splitLimit
+          , testProperty "splitting loses and adds no text" prop_splitKeeps
+          , testProperty "ordinals are 0..n-1" prop_splitOrdinals
+          , testCase "headings become the chunk's path" splitHeadings
+          , testCase "a heading inside a code fence is not a heading" splitFence
+          , testCase "hosts are read out of URLs" hosts
+          , testCase "only LAN hosts are private" locality
+          , testCase "citations are read back out of a reply" citations
           ]
       ]
 
@@ -256,3 +271,74 @@ keysAuth = do
   authorise ks (Just "Bearer llm_winsmuth_AAAAAAAAAAAAAAAAAAAAAAAA") @?= Right "winsmuth"
   assertBool "a wrong key is refused" (either (const True) (const False) (authorise ks (Just "Bearer llm_winsmuth_BBBBBBBBBBBBBBBBBBBBBBBB")))
   assertBool "no header is refused" (either (const True) (const False) (authorise ks Nothing))
+
+-- ---------------------------------------------------------------------------
+-- rag
+
+genDoc :: Gen Text
+genDoc = do
+  ls <- listOf (frequency [(6, line), (2, pure ""), (1, heading), (1, long), (1, fence)])
+  pure (T.intercalate "\n" ls)
+  where
+    line = T.pack <$> listOf (elements (['a' .. 'z'] <> "  ,.;é"))
+    heading = do
+      n <- choose (1, 4)
+      w <- T.pack <$> listOf1 (elements ['a' .. 'z'])
+      pure (T.replicate n "#" <> " " <> w)
+    long = T.replicate 400 . T.singleton <$> elements ['x', 'λ']
+    fence = pure "```"
+
+-- target and hard limit, positionally: the field names would clash with
+-- this module's `target`
+genSplit :: Gen (Int, Int)
+genSplit = do
+  t <- choose (20, 600)
+  h <- choose (t, t * 2)
+  pure (t, h)
+
+cfgOf :: (Int, Int) -> SplitConfig
+cfgOf (t, h) = SplitConfig t h
+
+prop_splitLimit :: Property
+prop_splitLimit = forAll genDoc \d -> forAll genSplit \c ->
+  all (\p -> T.length p.body <= snd c) (split (cfgOf c) d)
+
+prop_splitKeeps :: Property
+prop_splitKeeps = forAll genDoc \d -> forAll genSplit \c ->
+  T.filter (not . isSpace) (T.concat (map (.body) (split (cfgOf c) d))) === T.filter (not . isSpace) d
+
+prop_splitOrdinals :: Property
+prop_splitOrdinals = forAll genDoc \d -> forAll genSplit \c ->
+  let ps = split (cfgOf c) d in map (.ordinal) ps === [0 .. length ps - 1]
+
+splitHeadings :: Assertion
+splitHeadings = do
+  let doc = "intro\n# Install\nfirst\n## NixOS\nsecond\n# Use\nthird\n"
+      ps = split (SplitConfig 1000 1000) doc
+  map (.heading) ps @?= [[], ["Install"], ["Install", "NixOS"], ["Use"]]
+  map (\p -> (p.lineFrom, p.lineTo)) ps @?= [(1, 1), (2, 3), (4, 5), (6, 7)]
+
+splitFence :: Assertion
+splitFence = do
+  let doc = "# Real\n```\n# not a heading\n```\nafter\n"
+      ps = split (SplitConfig 1000 1000) doc
+  map (.heading) ps @?= [["Real"]]
+
+hosts :: Assertion
+hosts = do
+  hostOf "http://192.168.8.173:11434" @?= Just "192.168.8.173"
+  hostOf "https://user@Oracle.lan/x" @?= Just "oracle.lan"
+  hostOf "http://[fd00::1]:8080/" @?= Just "fd00::1"
+  hostOf "ftp://x" @?= Nothing
+
+locality :: Assertion
+locality = do
+  let yes = ["127.0.0.1", "localhost", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.8.173", "169.254.1.1", "::1", "fd00::1", "fe80::1", "oracle", "oracle.lan", "nas.home.arpa"]
+      no = ["8.8.8.8", "172.32.0.1", "192.169.0.1", "api.openai.com", "example.com", "2001:db8::1", "fd::1", "256.1.1.1"]
+  mapM_ (\h -> assertBool (T.unpack h <> " should be private") (privateHost h)) yes
+  mapM_ (\h -> assertBool (T.unpack h <> " should not be private") (not (privateHost h))) no
+
+citations :: Assertion
+citations = do
+  citedSources "It is in [2] and [1, 3]; see also [link] and [12]." @?= [1, 2, 3, 12]
+  citedSources "no sources" @?= []

@@ -169,6 +169,7 @@
         llama-server = ./nix/modules/llama-server.nix;
         gateway = ./nix/modules/gateway.nix;
         catalogue-check = ./nix/modules/catalogue-check.nix;
+        rag = ./nix/modules/rag.nix;
         default = {
           imports = [
             ./nix/modules/options.nix
@@ -178,6 +179,7 @@
             ./nix/modules/llama-server.nix
             ./nix/modules/gateway.nix
             ./nix/modules/catalogue-check.nix
+            ./nix/modules/rag.nix
           ];
         };
       };

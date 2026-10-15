@@ -61,6 +61,11 @@ library
     OpenSlop.Job
     OpenSlop.Measured
     OpenSlop.OpenAI
+    OpenSlop.Rag.Embed
+    OpenSlop.Rag.Locality
+    OpenSlop.Rag.Retrieve
+    OpenSlop.Rag.Split
+    OpenSlop.Rag.Store
     OpenSlop.Stats
   build-depends:
     aeson >=2.1,
@@ -74,6 +79,7 @@ library
     http-client,
     http-client-tls,
     http-types,
+    postgresql-simple,
     text,
     time,
     wai
@@ -151,6 +157,27 @@ executable llmq-bench
     text,
     time,
     unix
+
+executable llmq-index
+  import:          shared
+  hs-source-dirs:  app/llmq-index
+  main-is:         Main.hs
+  other-modules:
+    Extract
+  default-extensions:
+    MultiWayIf
+  ghc-options:     -threaded -rtsopts
+  build-depends:
+    open-slop,
+    base16-bytestring,
+    bytestring,
+    containers,
+    cryptohash-sha256,
+    directory,
+    filepath,
+    optparse-applicative,
+    text,
+    typed-process
 
 executable llmq-models
   import:          shared
