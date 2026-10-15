@@ -207,8 +207,16 @@
           grace = pkgs.open-slop.grace;
           llama-cpp-prismml = pkgs.open-slop.llama-cpp-prismml;
         }
-        // nixpkgs.lib.mapAttrs' (n: v: nixpkgs.lib.nameValuePair "bonsai-${n}" v) pkgs.open-slop.bonsai
-        // nixpkgs.lib.mapAttrs' (n: v: nixpkgs.lib.nameValuePair "gguf-${n}" v) pkgs.open-slop.gguf;
+        # callPackage on a file that returns an attribute set adds override
+        # and overrideDerivation to it, which are functions, and flake check
+        # refuses any packages.* entry that is not a derivation. Only the
+        # weights themselves are exported.
+        // nixpkgs.lib.mapAttrs' (n: v: nixpkgs.lib.nameValuePair "bonsai-${n}" v) (
+          nixpkgs.lib.filterAttrs (_: nixpkgs.lib.isDerivation) pkgs.open-slop.bonsai
+        )
+        // nixpkgs.lib.mapAttrs' (n: v: nixpkgs.lib.nameValuePair "gguf-${n}" v) (
+          nixpkgs.lib.filterAttrs (_: nixpkgs.lib.isDerivation) pkgs.open-slop.gguf
+        );
 
         apps = {
           default = {
