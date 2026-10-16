@@ -15,6 +15,8 @@
 module Stage
   ( PartArgs (..)
   , loadDocsStage
+  , AgentArgs (..)
+  , loadAgentStage
   ) where
 
 import Data.Text (Text)
@@ -23,6 +25,7 @@ import Grace.Decode (FromGrace, Key (..), ToGraceType)
 import Grace.Encode (ToGrace)
 import Grace.Input (Input (..), Mode (..))
 import Grace.Interpret (load)
+import OpenSlop.Agent.Action
 import OpenSlop.Grace.Docs (Docs, FileDoc)
 
 -- | What every stage is given for one part. The key and the model are
@@ -58,3 +61,57 @@ instance FromGrace Docs
 -- variable is the monad, not the result.
 loadDocsStage :: FilePath -> IO (PartArgs -> IO Docs)
 loadDocsStage file = load (Path file AsCode)
+
+-- | What an agent step is given: the instructions and the conversation so
+-- far, already rendered, so the Grace file only declares the type.
+data AgentArgs = AgentArgs
+  { key :: Key
+  , model :: Maybe Text
+  , instructions :: Text
+  , conversation :: Text
+  }
+  deriving stock (Generic)
+  deriving anyclass (ToGrace, ToGraceType)
+
+instance ToGraceType BrowseDirectoryArgs
+
+instance FromGrace BrowseDirectoryArgs
+
+instance ToGraceType ReadFileArgs
+
+instance FromGrace ReadFileArgs
+
+instance ToGraceType SearchIndexArgs
+
+instance FromGrace SearchIndexArgs
+
+instance ToGraceType LookupSourceArgs
+
+instance FromGrace LookupSourceArgs
+
+instance ToGraceType ReplaceTextArgs
+
+instance FromGrace ReplaceTextArgs
+
+instance ToGraceType WriteFileArgs
+
+instance FromGrace WriteFileArgs
+
+instance ToGraceType FinishArgs
+
+instance FromGrace FinishArgs
+
+instance ToGraceType Action
+
+instance FromGrace Action
+
+instance ToGraceType Decision
+
+instance FromGrace Decision
+
+-- | Load an agent step. The Haskell 'Decision' is the contract, the same
+-- way 'Docs' is for the reference-docs stage: a .ffg whose union has a
+-- different alternative, a field of another name or type, or a missing
+-- field does not load.
+loadAgentStage :: FilePath -> IO (AgentArgs -> IO Decision)
+loadAgentStage file = load (Path file AsCode)

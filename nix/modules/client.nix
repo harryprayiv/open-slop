@@ -5,7 +5,8 @@
 # and at what address; open-slop turns that plus the catalogue into the JSON
 # llmq reads, and wraps the binary so $OPEN_SLOP_CATALOGUE points at it and
 # $OPEN_SLOP_PROMPTS at the shipped prompts/ directory. llmq-index also gets
-# pandoc and pdftotext by store path and its rag defaults. Nothing
+# pandoc and pdftotext by store path and its rag defaults; llmq-agent gets
+# git, its model defaults and, when given, tricorder by store path. Nothing
 # in open-slop knows an address; every one comes from `endpoints` here.
 #
 # ============================================================================
@@ -56,6 +57,9 @@ let
         OPEN_SLOP_RAG_EMBED_MODEL = cfg.rag.embedModel;
         OPEN_SLOP_RAG_CHAT_AT = cfg.rag.chatAt;
         OPEN_SLOP_RAG_CHAT_MODEL = cfg.rag.chatModel;
+        OPEN_SLOP_AGENT_CHAT_AT = cfg.agent.chatAt;
+        OPEN_SLOP_AGENT_MODEL = cfg.agent.model;
+        TRICORDER = if cfg.agent.tricorder == null then null else lib.getExe' cfg.agent.tricorder "tricorder";
       }
     )
   );
@@ -72,7 +76,7 @@ let
         wrapProgram "$bin" \
           --set-default OPEN_SLOP_CATALOGUE ${catalogueJson} \
           --set-default OPEN_SLOP_PROMPTS ${../../prompts} \
-          --prefix PATH : ${lib.makeBinPath [ pkgs.fzf pkgs.xsel ]} \
+          --prefix PATH : ${lib.makeBinPath [ pkgs.fzf pkgs.xsel pkgs.git ]} \
           --set-default OPEN_SLOP_PANDOC ${lib.getExe pkgs.pandoc} \
           --set-default OPEN_SLOP_PDFTOTEXT ${lib.getBin pkgs.poppler-utils}/bin/pdftotext \
           ${ragFlags} \
@@ -152,6 +156,31 @@ in
         default = null;
         example = "qwen2.5:7b";
         description = "Chat model for llmq-index ask.";
+      };
+    };
+
+    # llmq-agent's defaults. Without its own settings it uses the rag chat
+    # model. tricorder is taken from its own flake, which builds with
+    # haskell.nix; see docs/manual/13-llmq-agent.md for the input and the
+    # binary caches it needs.
+    agent = {
+      chatAt = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "oracle/llamacpp";
+        description = "The endpoint llmq-agent asks for decisions. Unset means rag.chatAt.";
+      };
+      model = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "qwen2.5-coder:7b";
+        description = "The model llmq-agent uses. Unset means rag.chatModel.";
+      };
+      tricorder = lib.mkOption {
+        type = types.nullOr types.package;
+        default = null;
+        example = lib.literalExpression "inputs.tricorder.packages.\${pkgs.system}.tricorder";
+        description = "tricorder, the build oracle for Haskell. Unset means whatever tricorder is on PATH when llmq-agent runs.";
       };
     };
 

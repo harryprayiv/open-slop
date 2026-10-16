@@ -38,7 +38,8 @@
   #                            directory. Used only for llmq-grace, the
   #                            grace binary and the dev shell, on winsmuth.
   #
-  #   pkgs.open-slop.llmq        llmq, the gateway, llmq-claims, llmq-bench
+  #   pkgs.open-slop.llmq        llmq, the gateway, llmq-claims, llmq-bench,
+  #                              llmq-models, llmq-index, llmq-agent
   #   pkgs.open-slop.llmq-grace  the Grace stage runner: 4.6 GB, workstation
   #
   # ==========================================================================
@@ -123,9 +124,10 @@
           open-slop = {
             catalogue = import ./catalogue;
 
-            # What the fleet gets: llmq, the gateway, llmq-claims and
-            # llmq-bench, built from the plain set, so every dependency is
-            # the nixpkgs version and substitutes from the binary cache.
+            # What the fleet gets: llmq, the gateway, llmq-claims,
+            # llmq-bench, llmq-models, llmq-index and llmq-agent, built from
+            # the plain set, so every dependency is the nixpkgs version and
+            # substitutes from the binary cache.
             llmq = hlib.justStaticExecutables (hlib.dontHaddock hpkgs.open-slop);
 
             # The Grace stage runner. The GHC check is off because it cannot
@@ -237,6 +239,11 @@
           bench = {
             type = "app";
             program = "${pkgs.open-slop.llmq}/bin/llmq-bench";
+          };
+
+          agent = {
+            type = "app";
+            program = "${pkgs.open-slop.llmq}/bin/llmq-agent";
           };
 
           grace = {

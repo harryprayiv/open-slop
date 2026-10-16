@@ -21,8 +21,14 @@
 -- A generic mode that takes any stage type and writes the JSON through
 -- without a Haskell type (--json) is the obvious next form of this, and is
 -- not written yet: every stage today has a type in the binary.
+--
+-- With --agent-stage the program does something else: it loads an agent
+-- step (stages/agent-step.ffg) against the Haskell Decision type of
+-- llmq-agent, and with --task sends one step through the gateway; see
+-- AgentStep.
 module Main (main) where
 
+import AgentStep (agentP, runAgentStep)
 import Control.Exception (SomeException, displayException, try)
 import Control.Monad (forM, forM_, unless, when)
 import Data.Aeson (encode)
@@ -92,7 +98,15 @@ main = do
   _ <- installHandler sigINT onSignal Nothing
   _ <- installHandler sigTERM onSignal Nothing
 
-  o <- execParser (info (optsP <**> helper) (fullDesc <> progDesc "run a Grace stage over the parts of a job, keeping typed results"))
+  mode <-
+    execParser
+      ( info
+          (((Left <$> agentP) <|> (Right <$> optsP)) <**> helper)
+          (fullDesc <> progDesc "run a Grace stage over the parts of a job, keeping typed results; or, with --agent-stage, check an agent step and try it")
+      )
+  o <- case mode of
+    Left a -> runAgentStep a >> exitSuccess
+    Right x -> pure x
 
   forM_ o.gateway \url -> setEnv "OPENAI_BASE_URL" (T.unpack url)
   base <- lookupEnv "OPENAI_BASE_URL"

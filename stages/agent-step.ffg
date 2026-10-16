@@ -1,0 +1,53 @@
+# One step of the agent, in Grace. A conversation in, one typed decision out.
+#
+# The annotation at the bottom is the same type as OpenSlop.Agent.Action's
+# Decision in Haskell. Grace compiles it to the JSON Schema that llmq-agent
+# sends (the union becomes anyOf alternatives with a constant tag), the
+# server decodes under the grammar built from that schema, and Grace checks
+# the answer against the type. llmq-grace loads this file as
+# AgentArgs -> IO Decision, so a type here that drifts from the Haskell one
+# fails at load, before any request.
+#
+# A program folds the decision into what it does, as Grace's tools example
+# does:
+#
+#   let act = fold
+#         { BrowseDirectory: \x -> ...
+#         , ReadFile: \x -> ...
+#         , ...
+#         }
+#   in  act (step args).step
+#
+# Labels avoid `file`, `http`, `https` and `env`, which Grace's lexer reads
+# as the start of an import. Alternatives avoid starting with the name of a
+# built-in type (List, Text, Optional, Natural, Integer, Real, Bool, JSON,
+# Key, Type, Fields, Alternatives): the lexer tries those before an
+# alternative and has no word boundary, so `ListFiles` lexes as `List`
+# followed by `Files` and the file fails to parse. Field labels are not
+# affected, because labels are lexed first. The labels' alphabetical order
+# is the order the grammar makes the model write them in; see
+# OpenSlop.Agent.Action.
+
+\args ->
+
+prompt
+  { key: args.key
+  , model: args.model
+  , text: "
+      ${args.instructions}
+
+      ${args.conversation}
+      "
+  }
+  : { plan: Text
+    , step:
+        < BrowseDirectory: { directory: Text }
+        | ReadFile: { path: Text, startLine: Optional Natural, stopLine: Optional Natural }
+        | SearchIndex: { query: Text }
+        | LookupSource: { query: Text }
+        | ReplaceText: { path: Text, replace: Text, with: Text }
+        | WriteFile: { path: Text, text: Text }
+        | Check: { }
+        | Finish: { summary: Text }
+        >
+    }

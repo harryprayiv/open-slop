@@ -23,8 +23,8 @@ mkDerivation {
     process scientific text time typed-process unix warp warp-tls
   ];
   testHaskellDepends = [
-    aeson base bytestring containers tasty tasty-hunit tasty-quickcheck
-    text
+    aeson base bytestring containers directory filepath tasty
+    tasty-hunit tasty-quickcheck text
   ];
   description = "A Nix-configured local LLM machine: catalogue, engines, jobs, client, gateway, typed stages";
   license = lib.meta.getLicenseFromSpdxId "AGPL-3.0-or-later";

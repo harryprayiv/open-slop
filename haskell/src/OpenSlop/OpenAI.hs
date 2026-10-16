@@ -3,16 +3,23 @@
 -- Grace's @prompt@ keyword, and every other OpenAI-compatible client, sends
 -- this shape and decodes the answer with the @openai@ bindings. What is
 -- accepted is what a text-in, text-or-JSON-out request needs: messages with
--- string content or text parts, a response_format, a token cap, temperature
--- and seed. Anything else a client could ask for (tools, images, audio,
--- logprobs, several choices, streaming) is refused by name with a 400, so a
--- request is either served as written or rejected, never served with a
--- field quietly dropped.
+-- string content or text parts, a response_format, a token cap, temperature,
+-- seed and reasoning effort. Anything else a client could ask for (tools,
+-- images, audio, logprobs, several choices, streaming) is refused by name
+-- with a 400, so a request is either served as written or rejected, never
+-- served with a field quietly dropped.
+--
+-- A message's name is kept by writing it at the top of the content. Grace
+-- labels its messages ("Instructions", "Type", "Attempt", "Error") so the
+-- model can tell the required type from the last attempt and the compiler's
+-- complaint about it, and none of the local backends' chat templates show a
+-- name field to the model.
 module OpenSlop.OpenAI
   ( Role (..)
   , roleText
   , Message (..)
   , ResponseFormat (..)
+  , Effort (..)
   , responseFormatValue
   , ChatRequest (..)
   , FinishReason (..)
@@ -59,17 +66,22 @@ data Message = Message
 
 -- | Content is a string, or a list of parts of which only text parts are
 -- accepted; their texts are joined with newlines. The openai bindings send
--- the list form.
+-- the list form. A name becomes the content's first line, followed by a
+-- colon.
 instance FromJSON Message where
   parseJSON = withObject "message" \o -> do
     role <- o .: "role"
     c <- o .:? "content"
-    content <- case c of
+    body <- case c of
       Just (String t) -> pure t
       Just (Array parts) -> T.intercalate "\n" <$> traverse textPart (toList parts)
       Just Null -> fail "a message with null content (a tool call) is not supported"
       Nothing -> fail "a message has no content"
       Just _ -> fail "message content must be a string or a list of text parts"
+    name <- o .:? "name"
+    let content = case T.strip <$> name of
+          Just n | not (T.null n) -> n <> ":\n" <> body
+          _ -> body
     pure Message {role, content}
     where
       textPart = withObject "content part" \p -> do
@@ -111,6 +123,20 @@ responseFormatValue = \case
       , "json_schema" .= object ["name" .= name, "schema" .= schema, "strict" .= True]
       ]
 
+-- | OpenAI's reasoning_effort, which Grace's prompt sends when a stage sets
+-- `effort`. "none" is read as Minimal.
+data Effort = Minimal | Low | Medium | High
+  deriving stock (Eq, Show)
+
+instance FromJSON Effort where
+  parseJSON = withText "reasoning_effort" \case
+    "minimal" -> pure Minimal
+    "none" -> pure Minimal
+    "low" -> pure Low
+    "medium" -> pure Medium
+    "high" -> pure High
+    other -> fail ("reasoning_effort " <> T.unpack other <> " is not one of minimal, low, medium, high")
+
 data ChatRequest = ChatRequest
   { model :: Text
   , messages :: [Message]
@@ -118,12 +144,13 @@ data ChatRequest = ChatRequest
   , maxTokens :: Maybe Int
   , temperature :: Maybe Double
   , seed :: Maybe Int
+  , effort :: Maybe Effort
+  -- ^ how the backend is told is in "OpenSlop.Gateway.Translate"
   }
   deriving stock (Eq, Show)
 
 -- | Fields the gateway cannot honour fail the parse by name. Fields that do
--- not change the answer (user, metadata, store, service_tier, and Grace's
--- reasoning_effort, which no local model reads) are ignored.
+-- not change the answer (user, metadata, store, service_tier) are ignored.
 instance FromJSON ChatRequest where
   parseJSON = withObject "chat completion request" \o -> do
     mapM_ (refuse o) unsupported
@@ -139,7 +166,8 @@ instance FromJSON ChatRequest where
     mt <- o .:? "max_tokens"
     temperature <- o .:? "temperature"
     seed <- o .:? "seed"
-    pure ChatRequest {model, messages, responseFormat, maxTokens = maybe mt Just mct, temperature, seed}
+    effort <- o .:? "reasoning_effort"
+    pure ChatRequest {model, messages, responseFormat, maxTokens = maybe mt Just mct, temperature, seed, effort}
     where
       unsupported = ["tools", "functions", "tool_choice", "logprobs", "top_logprobs", "audio", "modalities", "prediction", "web_search_options"]
       refuse :: KeyMap.KeyMap Value -> Text -> Parser ()

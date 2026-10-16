@@ -26,6 +26,27 @@
 --                 no OpenAI route at all (404 on /v1/models).
 --
 -- ============================================================================
+-- REASONING EFFORT
+-- ============================================================================
+--
+-- Sent only when the client set reasoning_effort, which Grace does only when
+-- a stage sets `effort`.
+--
+--   ollama        `think`: false for minimal; for gpt-oss models, which take
+--                 a level, the level; otherwise true. ollama refuses true
+--                 for a model without a thinking mode, and that refusal is
+--                 passed back to the client: the stage asked for something
+--                 the model cannot do.
+--   llama-server  chat_template_kwargs with enable_thinking (Qwen3 and
+--                 similar templates) and reasoning_effort (gpt-oss, which
+--                 has no minimal, so minimal is sent as low). A template
+--                 ignores the arguments it does not use.
+--   hailo-ollama  nothing; none of its models reason.
+--
+-- Both servers return the thinking apart from the answer, so the answer
+-- the client gets is the content alone.
+--
+-- ============================================================================
 -- THE WINDOW IS CHECKED BEFORE AND AFTER
 -- ============================================================================
 --
@@ -106,6 +127,7 @@ plan t r = do
                             <> catMaybes [("temperature" .=) <$> temperature, ("seed" .=) <$> r.seed]
                         )
                   ]
+                    <> ["think" .= ollamaThink t.name e | Just e <- [r.effort]]
                     <> case r.responseFormat of
                       Just (FormatJsonSchema _ schema) -> ["format" .= schema]
                       Just FormatJsonObject -> ["format" .= ("json" :: Text)]
@@ -133,6 +155,7 @@ plan t r = do
                       , ("seed" .=) <$> r.seed
                       , ("response_format" .=) . responseFormatValue <$> r.responseFormat
                       , ("max_tokens" .=) <$> r.maxTokens
+                      , ("chat_template_kwargs" .=) . llamaThink <$> r.effort
                       ]
                 )
           }
@@ -161,6 +184,27 @@ plan t r = do
       invalidRequest
         (Just "response_format_unsupported")
         (target.name <> " is served by hailo-ollama, which cannot constrain output to a schema and answers 500 to a request carrying one; use a cpu or llamacpp model")
+
+ollamaThink :: Text -> Effort -> Value
+ollamaThink name = \case
+  Minimal -> Bool False
+  e
+    | "gpt-oss" `T.isPrefixOf` name -> String (effortText e)
+    | otherwise -> Bool True
+
+llamaThink :: Effort -> Value
+llamaThink e =
+  object
+    [ "enable_thinking" .= (e /= Minimal)
+    , "reasoning_effort" .= effortText (if e == Minimal then Low else e)
+    ]
+
+effortText :: Effort -> Text
+effortText = \case
+  Minimal -> "minimal"
+  Low -> "low"
+  Medium -> "medium"
+  High -> "high"
 
 -- | A backend's answer, in the terms the OpenAI response and llmq's verdict
 -- need.

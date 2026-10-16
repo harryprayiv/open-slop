@@ -9,9 +9,10 @@ build-type:         Simple
 
 -- llmq-grace links Grace, whose closure keeps a reference to the compiler,
 -- which puts 4.6 GB into any output containing it. The fleet's binaries
--- (llmq, open-slop-gateway, llmq-claims, llmq-bench, llmq-models) must not
--- carry that to a Pi, so the executable that needs Grace is behind a flag: the package
--- builds without it by default, and the workstation build turns it on.
+-- (llmq, open-slop-gateway, llmq-claims, llmq-bench, llmq-models,
+-- llmq-index, llmq-agent) must not carry that to a Pi, so the executable
+-- that needs Grace is behind a flag: the package builds without it by
+-- default, and the workstation build turns it on.
 flag grace
   description: Build llmq-grace, which links Grace and the compiler with it.
   default:     False
@@ -47,8 +48,13 @@ library
   import:          shared
   hs-source-dirs:  src
   exposed-modules:
+    OpenSlop.Agent.Action
+    OpenSlop.Agent.Oracle
+    OpenSlop.Agent.Transcript
+    OpenSlop.Agent.Workspace
     OpenSlop.Capacity
     OpenSlop.Catalogue
+    OpenSlop.ChatStream
     OpenSlop.Chunk
     OpenSlop.Claim
     OpenSlop.Chase
@@ -185,6 +191,27 @@ executable llmq-index
     time,
     typed-process
 
+executable llmq-agent
+  import:          shared
+  hs-source-dirs:  app/llmq-agent
+  main-is:         Main.hs
+  other-modules:
+    Git
+    Loop
+    Tricorder
+  ghc-options:     -threaded -rtsopts
+  build-depends:
+    open-slop,
+    aeson,
+    bytestring,
+    containers,
+    directory,
+    filepath,
+    optparse-applicative,
+    text,
+    time,
+    typed-process
+
 executable llmq-models
   import:          shared
   hs-source-dirs:  app/llmq-models
@@ -216,6 +243,7 @@ executable llmq-grace
   hs-source-dirs:  app/llmq-grace
   main-is:         Main.hs
   other-modules:
+    AgentStep
     Stage
   ghc-options:     -threaded -rtsopts
   if !flag(grace)
@@ -242,6 +270,8 @@ test-suite open-slop-test
     aeson,
     bytestring,
     containers,
+    directory,
+    filepath,
     tasty,
     tasty-hunit,
     tasty-quickcheck,
