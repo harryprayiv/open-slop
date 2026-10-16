@@ -18,13 +18,13 @@ private-gpt is now a Python server that follows the Anthropic Messages API, with
 | Limits that follow the model and hardware | defers to the server | yes: the window, characters per token and prefill rate come from the server and the benchmark (see [Capacity](12-capacity.md)); answers are not capped |
 | Web UI | yes | no |
 | API for other programs | yes | no: the gateway has no retrieval route and does not stream yet |
-| Tools, MCP, code execution, web fetch | yes | no |
+| Tools, MCP, code execution, web fetch | yes | partly, in [llmq-agent](13-llmq-agent.md): typed actions under a grammar (read, browse, search this index, library source, edit), with the compiler and test suites as the check; no MCP, no shell, no web |
 | Database and CSV analysis | yes | no |
-| Extended thinking shown separately | yes | no |
+| Extended thinking shown separately | yes | in llmq-agent only, printed apart from the decision; not in `ask` or `chat` |
 | Text kept on the LAN, enforced in code | by configuration | by type: a server outside the LAN is refused before a request exists |
 | Typed, verified output | no | elsewhere in open-slop: llmq-grace and llmq-claims |
 
-The missing rows are the work that remains: streaming and a retrieval route on the gateway, a web UI, tools, and showing a reasoning model's thinking.
+The work that remains: streaming and a retrieval route on the gateway, a web UI, MCP, and showing a reasoning model's thinking in `ask` and `chat`.
 
 ## How one question is answered
 

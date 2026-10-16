@@ -15,6 +15,9 @@
 | `OPEN_SLOP_RAG_EMBED_AT`, `OPEN_SLOP_RAG_EMBED_MODEL` | llmq-index | Embedding server and model. |
 | `OPEN_SLOP_RAG_CHAT_AT`, `OPEN_SLOP_RAG_CHAT_MODEL` | llmq-index | Chat server and model for `ask`. |
 | `OPEN_SLOP_PANDOC`, `OPEN_SLOP_PDFTOTEXT` | llmq-index | Converters. Set by the wrapper; PATH otherwise. |
+| `OPEN_SLOP_AGENT_CHAT_AT`, `OPEN_SLOP_AGENT_MODEL` | llmq-agent | Its server and model. Unset means the `OPEN_SLOP_RAG_CHAT_*` pair. |
+| `TRICORDER` | llmq-agent | The tricorder executable. Set by the wrapper when `programs.llmq.agent.tricorder` is; PATH otherwise. |
+| `OPEN_SLOP_RAG_DB`, `OPEN_SLOP_RAG_EMBED_AT`, `OPEN_SLOP_RAG_EMBED_MODEL` | llmq-agent | The index, with `--index`. |
 | `DISPLAY` | llmq | Needed for `-i clip`. |
 | `XDG_CACHE_HOME`, `XDG_STATE_HOME`, `HOME`, `TMPDIR` | several | Standard locations. |
 
@@ -26,6 +29,9 @@
 | `~/.local/state/llmq/<id>/` | llmq, llmq-grace | Jobs. See [llmq](03-llmq.md). |
 | `~/.local/state/open-slop/chats/*.md` | llmq-models | Chat transcripts. |
 | `claims-out/` | llmq-claims | Claims per file and `claims.md`. |
+| `~/.local/state/llmq-agent/<run>/` | llmq-agent | `steps.jsonl`, `transcript.md`, `result.json`, and the worktree while the run lasts. |
+| branch `llmq-agent/<run>` | llmq-agent | In your repository: one commit per edit. |
+| `.tricorder.yaml` | you | tricorder's configuration, in the project. |
 | Postgres `llmq_rag` | llmq-index | Tables `rag_documents`, `rag_chunks`, `rag_embeddings`, `rag_sessions`, `rag_turns`. |
 | `/var/lib/private/ollama` | ollama | Weights. |
 | `/var/lib/hailo-ollama` | hailo-ollama | Zoo data and weights. |
@@ -60,3 +66,4 @@
 | llmq-claims | some claims accepted | input or warm-up failed | no claim accepted | |
 | llmq-bench | done | a check or a fatal step failed | | |
 | llmq-index | done | failed, with the reason on stderr | | |
+| llmq-agent | finished, Finish accepted | the server failed or the run could not start | out of steps, or stuck | |

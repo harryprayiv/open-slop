@@ -33,6 +33,12 @@ On the client:
 
 **`llmq-index` refuses an endpoint as not private.** The endpoint's address is public, or a hostname with a suffix it does not accept. Use the LAN address in `programs.llmq.endpoints`.
 
+**llmq-agent says tricorder is not on PATH.** Set `programs.llmq.agent.tricorder`, pass `--tricorder PATH`, or add tricorder to the project's dev shell. Without it the run goes on with no build checks; `--tricorder-required` makes that an error.
+
+**llmq-agent's first build fails with a cabal error.** tricorder could not start `cabal repl` in the worktree. Run llmq-agent from the project's `nix develop` shell, and check that `cabal repl` works there by hand.
+
+**llmq-agent waits a long time after an edit.** The edit triggered a full rebuild, or a test suite is slow. Watch it with `tricorder ui` in the run's worktree; `--build-timeout` bounds the wait.
+
 **hailo-ollama will not start.** Check `dmesg | grep -i hailo`. "driver_compatible is false" means the driver and firmware versions disagree; remove power for ten seconds.
 
 ## Quirks in the current code
@@ -49,3 +55,6 @@ These are behaviours the code has now that you may not expect. Each is a candida
 8. The chat in `llmq-models` does not show a reasoning model's thinking, but counts its tokens in the rate when the server reports them.
 9. `llmq run` and the gateway size input from the catalogue's budget, not from the measured capacity. For llmq run this keeps a job's id stable between runs; for the gateway it is not yet done.
 10. llama-server reports prompt counts that exclude its cached prefix, so the chat does not learn characters per token from llama-server answers; it uses the benchmark's figure.
+11. llmq-agent builds the worktree from nothing on its first run, because `dist-newstyle` is not shared with your checkout. The first build of a large project takes as long as a clean build.
+12. llmq-agent's worktree has only committed files. Uncommitted changes in your checkout are reported at the start and are not in the run.
+13. An edit to a file tricorder does not watch is answered, after `--settle` seconds, with the report of the build before the edit, which the edit did not change.

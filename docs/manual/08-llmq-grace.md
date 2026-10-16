@@ -51,3 +51,20 @@ Exit status matches llmq: 0, 1, 2 for warnings, 130 when interrupted.
 ## Building it
 
 llmq-grace is in `pkgs.open-slop.llmq-grace`, not in the fleet package, because it links Grace and the compiler (about 4.6 GB). Install it on the workstation only.
+
+## Agent steps
+
+With `--agent-stage`, llmq-grace does something else: it loads an agent step written in Grace, checks it against the Haskell decision type of [llmq-agent](13-llmq-agent.md), and with `--task` sends one step through the gateway and prints the decision.
+
+    llmq-grace --agent-stage stages/agent-step.ffg
+    llmq-grace --agent-stage stages/agent-step.ffg --gateway https://oracle:8443/v1 --key-file ~/.config/llmq/key -m oracle/cpu/qwen2.5-coder:7b --task "Add a --verbose flag."
+
+| Option | Meaning |
+|---|---|
+| `--agent-stage FILE` | The stage. Required in this mode. |
+| `--task TEXT` | Send the first step of this task. Without it, the stage is only loaded and checked. |
+| `--gateway URL`, `--key-file FILE`, `-m ID` | As above; needed only with `--task`. |
+
+The stage is a function from `{ key: Key, model: Optional Text, instructions: Text, conversation: Text }` to the decision type. A stage whose union has an extra or missing alternative, or a field of another name or type, fails to load with Grace's type error and exit status 1.
+
+Grace's lexer reads the names of its built-in types before an alternative name, with no word boundary, so an alternative must not start with `List`, `Text`, `Optional`, `Natural`, `Integer`, `Real`, `Bool`, `JSON`, `Key`, `Type`, `Fields` or `Alternatives`. `ListFiles` lexes as `List` followed by `Files` and the stage does not parse. Record labels are not affected.

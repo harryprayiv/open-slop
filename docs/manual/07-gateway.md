@@ -39,7 +39,21 @@ A model is named by its id or by any unique suffix of it. The model list is cach
 
 ## What a request may contain
 
-Accepted: `model`, `messages` (system, developer, user and assistant roles, text content), `response_format` (`text`, `json_object`, `json_schema`), `max_completion_tokens` or `max_tokens`, `temperature`, `seed`. Ignored: `user`, `metadata`, `store`, `service_tier`, `reasoning_effort`.
+Accepted: `model`, `messages` (system, developer, user and assistant roles, text content, and a `name`), `response_format` (`text`, `json_object`, `json_schema`), `max_completion_tokens` or `max_tokens`, `temperature`, `seed`, `reasoning_effort`. Ignored: `user`, `metadata`, `store`, `service_tier`.
+
+A message's `name` is written at the top of its content, followed by a colon, because none of the backends' chat templates show the field to the model. Grace labels its messages "Instructions", "Type", "Attempt" and "Error", and with the label in the text the model can tell the required type from its last attempt and the compiler's complaint about it.
+
+`reasoning_effort` is `minimal` (or `none`), `low`, `medium` or `high`, and is sent only when the client sets it; Grace sets it when a stage sets `effort`.
+
+| Backend | What it is sent |
+|---|---|
+| ollama | `think`: false for minimal; for a gpt-oss model, the level; otherwise true. ollama refuses true for a model without a thinking mode, and that refusal is returned to the client. |
+| llama-server | `chat_template_kwargs` with `enable_thinking` (false for minimal) and `reasoning_effort` (low for minimal, since gpt-oss has no minimal). Templates ignore arguments they do not use. |
+| hailo-ollama | Nothing. |
+
+Both servers return the thinking apart from the answer, so the client gets the answer alone.
+
+A `json_schema` response format is passed through unchanged, including the `anyOf` unions Grace derives from union types. Checked 2026-10-16 with llama.cpp's converter, which ollama and llama-server both use: the schema for the agent's decision type becomes a grammar that accepts every decision and rejects an unknown action. See [llmq-agent](13-llmq-agent.md).
 
 Refused with 400: `stream: true`, `n` other than 1, tools and function calling, logprobs, audio, modalities, prediction, web search options, image or other non-text content, and an empty message list. A body over 8 MiB gets 413.
 
