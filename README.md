@@ -1,6 +1,8 @@
 # open-slop
 
-Guardrails that let a small local model do real work: the servers as NixOS modules, a catalogue of what each model is, a benchmark that measures what each model costs on the machine that serves it, a viewer and chat for comparing them, a client that turns long input into documentation as a resumable job, a claims extractor that checks every claim against its evidence, an authenticated gateway that constrains what a model may return, and a runner that calls typed Grace stages so the model's output is checked against a Haskell type before any of it reaches your code.
+Guardrails that let a small local model do real work: the servers as NixOS modules, a catalogue of what each model is, a benchmark that measures what each model costs on the machine that serves it, a viewer and chat for comparing them, a client that turns long input into documentation as a resumable job, a claims extractor that checks every claim against its evidence, an authenticated gateway that constrains what a model may return, a runner that calls typed Grace stages so the model's output is checked against a Haskell type before any of it reaches your code, an index of your own files that answers questions with citations, and an agent that works on a Haskell project one typed action at a time with the compiler judging every edit.
+
+The full manual, one page per program, is in [docs/manual](docs/manual/README.md). This file is the overview: the idea, the layout, and where it is going.
 
 Licence: AGPL-3.0-or-later for everything here. The Hailo packages fetch proprietary blobs and say so in their meta.
 
@@ -14,6 +16,9 @@ A 7B model on a Raspberry Pi is unreliable in a specific, boring way: it wanders
 - **Every window is checked twice.** Input bytes before sending, the server's own prompt count after. Silent truncation is a failure, not a shorter answer.
 - **Coverage is a comparison of values.** The runner knows which files were in a part and which ones came back; a skipped file is a warning and a non-zero exit, not something you notice a week later.
 - **Choosing a model is a measurement.** Which model gets which job is decided from repeated, condition-checked timings taken on the machine that serves it, with the raw samples kept, not from a vendor figure or one run of one prompt.
+- **Limits follow the model and the hardware.** How much a request may carry comes from the window the server reports, the characters per token llmq-bench measured, and the catalogue's limit for that machine. No count of sources, no history length and no answer length is fixed in the code, so the same programs use a 128K window when a bigger machine serves one.
+- **Tools are a type, not a format the model was trained on.** The agent's actions are a closed union decoded under a grammar. The model chooses an alternative and fills in its fields; it cannot name an action that does not exist, and the program decides what each action does.
+- **Code is judged by the compiler.** Every edit the agent makes is followed by the build and the test suites, and their report is what the model reads next. Finishing after an edit needs a clean build and passing tests.
 
 What is left for the model is judgement inside a fixed shape. That is the part a small model can sometimes do, and the part nothing can verify for you, which is why the output lands in a file for a person to read.
 
@@ -29,16 +34,21 @@ nix/modules/pinned.nix             store-pinned GGUFs registered with ollama
 nix/modules/hailo.nix              the Hailo-10H stack and hailo-ollama
 nix/modules/llama-server.nix       llama.cpp's llama-server serving one GGUF, started on demand
 nix/modules/gateway.nix            the authenticated OpenAI-compatible endpoint
+nix/modules/rag.nix                Postgres with pgvector for llmq-index
 nix/modules/catalogue-check.nix    warns and asserts against the catalogue
 nix/modules/client.nix             home-manager: programs.llmq
 nix/packages/                      the llama.cpp fork, Bonsai and GGUF weights, the Hailo packages
-haskell/src/OpenSlop/              the library: catalogue, engines, HTTP, jobs, measurements, gateway
+haskell/src/OpenSlop/              the library: catalogue, engines, HTTP, jobs, measurements, gateway, capacity
+haskell/src/OpenSlop/Rag/          the index: splitting, embedding, the store, retrieval, the LAN check
+haskell/src/OpenSlop/Agent/        the agent's types: actions, the build report, the transcript, the workspace
 haskell/app/llmq/                  the documentation client
 haskell/app/llmq-bench/            the benchmark: Protocol, Probe, Stats, Conditions, Control, Restraint
 haskell/app/llmq-models/           the viewer and chat: Models, Render, Style, Live, Chat, ChatScreen
 haskell/app/llmq-claims/           one call per subject, evidence-checked claims out
 haskell/app/gateway/               open-slop-gateway
 haskell/app/llmq-grace/            the typed stage runner, behind the grace flag
+haskell/app/llmq-index/            ingest, search, ask and chat over your own files
+haskell/app/llmq-agent/            the agent: the loop, git worktrees, tricorder
 prompts/                           named instructions, shipped with llmq
 stages/                            Grace stages, typed against Haskell records
 tests/grace/                       one Grace program per prompt path
@@ -46,6 +56,8 @@ golden/                            the golden set, the gate on every prompt chan
 docs/HANDOFF.md                    state, decisions, open questions, pipe dreams
 docs/measurements.md               numbers, only measured ones
 docs/latest.md                     the one-screen status
+docs/manual/                       the manual: every program, option, file and variable
+docs/research/                     write-ups that decided a direction
 ```
 
 ## Outputs
@@ -54,10 +66,10 @@ docs/latest.md                     the one-screen status
 - `homeManagerModules.default`: `programs.llmq`.
 - `overlays.default`: `pkgs.open-slop.{llmq,llmq-grace,catalogue,llama-cpp-prismml,bonsai,gguf,grace}`.
 - `packages.<system>.{llmq,llmq-grace,grace,llama-cpp-prismml,bonsai-*,gguf-*}`.
-- `apps.<system>.{default,gateway,claims,bench,grace,cabal2nix}`.
+- `apps.<system>.{default,gateway,claims,bench,agent,grace,cabal2nix}`.
 - `lib.catalogue`: the catalogue as data.
 
-`llmq` carries `llmq`, `open-slop-gateway`, `llmq-claims`, `llmq-bench` and `llmq-models`, and is what a row gets; `programs.llmq` wraps every one of them so it finds the catalogue and the prompts. `llmq-grace` also carries the Grace runner and weighs 4.6 GB, because Grace's closure keeps a reference to the compiler; it is a workstation tool and is kept off the fleet by the `grace` cabal flag. See HANDOFF section 4.
+`llmq` carries `llmq`, `open-slop-gateway`, `llmq-claims`, `llmq-bench`, `llmq-models`, `llmq-index` and `llmq-agent`, and is what a row gets; `programs.llmq` wraps every one of them so it finds the catalogue and the prompts. `llmq-grace` also carries the Grace runner and weighs 4.6 GB, because Grace's closure keeps a reference to the compiler; it is a workstation tool and is kept off the fleet by the `grace` cabal flag. See HANDOFF section 4.
 
 The consumer adds the overlay to its package set and imports the modules. The modules do not set `nixpkgs.overlays` themselves: home-manager running with `useGlobalPkgs` rejects that from a module.
 
@@ -276,6 +288,8 @@ What it refuses, rather than degrading without saying so: fields it cannot honou
 
 Per backend: ollama gets `/api/chat` with the schema as `format`; llama-server gets its own `/v1/chat/completions`; hailo-ollama gets `/api/generate` and is refused any schema, because it cannot constrain output and reports no prompt count.
 
+A message's `name` is written at the top of its content, because no local chat template shows the field to the model and Grace uses names to tell the required type from its last attempt and the compiler's complaint. `reasoning_effort` becomes ollama's `think` and llama-server's `chat_template_kwargs`. A union schema (`anyOf` alternatives with a constant tag, which is what Grace derives from a union type) passes through unchanged; checked 2026-10-16 with llama.cpp's own converter, the grammar it makes accepts every alternative and rejects anything else.
+
 ## Using llmq-grace
 
 llmq's job machinery with a Grace stage in place of the prose prompt, and a typed value out.
@@ -288,6 +302,36 @@ llmq-grace --stage stages/reference-docs.ffg --gateway URL --key-file FILE \
 Each part produces `parts/NNNN.grace.json` (the typed value, which is what a later stage reads) beside `parts/NNNN.md` (rendered from it in Haskell, for a person). The stage's result type lives in the binary, so a `.ffg` whose annotation disagrees fails at load with the field named.
 
 Two Grace facts that cost a day to find, both in HANDOFF section 10: `file` is a URI scheme in Grace's lexer, so a record label `file:` starts an import (the field is `path`); and `prompt`'s `model` is `Optional Text`, so the Haskell field is `Maybe Text`.
+
+A third, found 2026-10-16: Grace's lexer tries the built-in type names (`List`, `Text`, `Optional`, `Natural` and the rest) before an alternative name, with no word boundary, so an alternative called `ListFiles` lexes as `List` followed by `Files` and the file does not parse. Record labels are not affected. The fix in Grace is a word boundary after those names.
+
+`--agent-stage stages/agent-step.ffg` loads the agent's decision type, written in Grace, against the Haskell one, and with `--task` sends one step through the gateway and prints the decision Grace decoded.
+
+## Asking your files: llmq-index
+
+```fish
+llmq-index ingest ~/notes ~/git
+llmq-index ask "what port does the gateway listen on?"
+llmq-index chat --session gateway
+```
+
+Your files are split along headings, embedded on the LAN, and stored in Postgres with pgvector on blade. A question is answered from a hybrid search, vector and full text fused by rank, so exact identifiers are found as well as paraphrases. As many sources as the model's capacity allows are packed in front of the question, the answer streams, and an answer that cites nothing or cites a source it was not given is flagged. A conversation is stored by name and can be continued from any machine that reaches the database; follow-up questions are rewritten to stand alone before searching. Every server text goes to is checked by type to be on loopback or the LAN before a request exists. The manual's [llmq-index page](docs/manual/09-llmq-index.md) compares it with private-gpt row by row.
+
+## How much a model can take: capacity
+
+Every program that decides how much to send (llmq-index, llmq-models' chat, llmq-agent) asks `OpenSlop.Capacity`. The window is llama-server's allocated context, or for ollama the smaller of the model's trained context and the catalogue's limit for that machine. Characters per token come from llmq-bench's measurement and are refined from the prompt counts servers report. `--max-wait` shrinks a prompt further by the measured prefill rate. Answers are never capped: ollama gets `num_predict: -2`, llama-server no `max_tokens`. See [Capacity](docs/manual/12-capacity.md).
+
+## Working on code: llmq-agent
+
+```fish
+nix develop
+llmq-agent --task "make parseDuration accept 90s and 1h30m"
+llmq-agent --read-only --task "where does the gateway check the window?"
+```
+
+Each step, the model returns a decision: a short plan and one action from a closed set (browse a directory, read a file, search the index, look up library source, replace text, write a file, check the build, finish). The schema for that union is the same one Grace derives from `stages/agent-step.ffg`, so the server samples only valid decisions. The agent works in a git worktree on its own branch, `llmq-agent/<run>`, with one commit per edit, and never writes to your checkout. After every edit [tricorder](https://github.com/tweag/tricorder) rebuilds and runs the tests, and its report (errors first, with spans, then warnings, then failing cases) is the next observation. `LookupSource` reads any dependency's source offline from the documentation Nix already built. Finish after an edit is refused until the build is clean and the tests pass.
+
+What it confines is what the model reads and writes. Compiling still runs the project's Template Haskell, any custom Setup and its tests, which the model may have written, so a task from someone you do not trust needs the run in a sandbox. The [llmq-agent page](docs/manual/13-llmq-agent.md) has the options, the tricorder flake input and its binary caches, and the log format; [the research write-up](docs/research/tricorder-and-grace.md) has why tricorder and what is left (PureScript over `purs ide server`, dependency source in the index, MCP).
 
 ## Developing
 
@@ -360,6 +404,8 @@ Before any of that: cache the preamble, and shrink it. An ABNF-only variant with
 
 Grace's `toJSONSchema` emits record properties through a `Map`, so the schema's `properties` object is alphabetical while `required` keeps declaration order. Under grammar-constrained decoding the model writes fields in schema order, so the alphabet decides what it commits to first. That matters because constraining output can cost reasoning quality: the model has nowhere to think before committing. The fix inside a constrained schema is a scratch field the caller throws away, and it only helps if it is generated first, which means naming it to sort first (`analysis`, not `notes`). Two lines in the Grace type and the Haskell record. Whether it improves anything on a 7B is exactly what the golden set is for.
 
+Measured 2026-10-16 with llama.cpp's converter: the order holds in the grammar, and inside a union alternative `contents` comes before `tag`, so the model fills in an action's fields before naming it. llmq-agent's decision type is named to sort sensibly (`plan` before `step`, `path` before `replace` before `with`). The reference-docs stage has not had the scratch field added yet.
+
 ### What none of this fixes
 
 Each part is written with no view of the others, so relationships across files are missing by construction. A schema guarantees shape, not truth: in the first end-to-end run a 0.5B filled `interface` with the prompt's own category words and `reasoning` with a confident falsehood, and every layer reported success. The output is for a person to read.
@@ -372,58 +418,5 @@ Read docs/HANDOFF.md before touching anything. In brief:
 - **Deployed on the clients:** llmq, llmq-models, llmq-bench, with measurements kept in each client's cache.
 - **Measured:** every model oracle serves, on 2026-09-29, with one sample per figure on a board that was throttling. That run is what showed the need for protocol 3. The first protocol-3 run, from blade, is in progress.
 - **Verified on winsmuth against a local model, not yet on the fleet:** the gateway, the Grace fork and llmq-grace.
-- **Does not exist:** a job queue or runner, the fleet CA the gateway needs, and a golden set large enough to judge prompt changes.
-
-
-# open-slop manual
-
-open-slop runs small open-weight language models on your own machines and gives you several tools for using them. Everything runs on your LAN. Nothing in this project sends text to a hosted model.
-
-This manual covers every program, every NixOS and home-manager option, every file the programs write, and every environment variable they read. It is written from the source.
-
-## Which tool do I want?
-
-The project has one library and seven programs. They differ in how you talk to the model and in what checks the output.
-
-| You want to | Use | How the model is used |
-|---|---|---|
-| See which models you have, how fast each one is, and chat with one or several side by side | `llmq-models` | Interactive chat, free text, nothing checked |
-| Ask one question from a script or a terminal | `llmq ask` | One request, free text |
-| Turn a long input (a source dump, notes) into a document, resumably | `llmq run` | Many requests, one per part, free text with coverage warnings |
-| Extract claims about each file in a dump, each one checked against quoted evidence | `llmq-claims` | One schema-constrained request per file, verified by code |
-| Get output whose shape is a Haskell type, checked before your code sees it | `llmq-grace` | Typed Grace stage per part, through the gateway |
-| Give other programs and machines one authenticated OpenAI-style endpoint | `open-slop-gateway` | Server, refuses requests that cannot fit or cannot be honoured |
-| Ask questions of your own files, one at a time or as a stored conversation, with citations | `llmq-index` | Embeddings, hybrid retrieval, packing sources to the model's capacity, a streamed cited answer |
-| Measure what each model costs on the machine that serves it | `llmq-bench` | Benchmark, run by hand, results kept in your cache |
-
-The usual confusion is between the chat and Grace. The chat in `llmq-models` is conversation: you type, the model answers, nothing is checked. `llmq-grace` is a batch pipeline: a Grace program declares the type of the answer, the server is forced to produce JSON of that shape, and Grace checks it before it is written. Use the chat to explore and compare. Use Grace when a program depends on the answer.
-
-## Pages
-
-1. [Installing](docs/manual/01-install.md): the flake, the overlay, NixOS and home-manager, unfree packages, persistence.
-2. [Servers and the catalogue](docs/manual/02-servers.md): ollama, pinned models, llama-server, the Hailo NPU, firewall rules, the catalogue and how it is checked.
-3. [llmq](docs/manual/03-llmq.md): one-off questions and resumable long jobs.
-4. [llmq-models](docs/manual/04-llmq-models.md): the model table, graph, answers view and chat.
-5. [llmq-bench](docs/manual/05-llmq-bench.md): the measurement protocol and how to run it overnight.
-6. [llmq-claims](docs/manual/06-llmq-claims.md): evidence-checked claims.
-7. [open-slop-gateway](docs/manual/07-gateway.md): the authenticated endpoint.
-8. [llmq-grace](docs/manual/08-llmq-grace.md): typed Grace stages.
-9. [llmq-index](docs/manual/09-llmq-index.md): asking questions of your own files, alone or as a conversation, and how it compares with private-gpt.
-10. [Files, variables and exit codes](docs/manual/10-reference.md): one place for every path and variable.
-11. [Troubleshooting and known quirks](docs/manual/11-troubleshooting.md).
-12. [Capacity](docs/manual/12-capacity.md): how every program works out how much a model can take, from the server, the benchmark and the catalogue, and why answers are not capped.
-
-## Words used throughout
-
-A row is a machine that serves models, such as oracle. A backend is one inference server on a row: `cpu` is ollama, `hailo` is hailo-ollama on the NPU, `llamacpp` is llama-server. An endpoint is a row and a backend together, written `row/backend`, for example `oracle/cpu`. A model id is `row/backend/name`, for example `oracle/cpu/qwen2.5-coder:7b`. Every program accepts any unique suffix of a model id, so `qwen2.5-coder:7b` works when only one server has it.
-
-The catalogue is the JSON description of the backends and models, built by Nix. The measurements file is `measured.json` in your cache, written by `llmq-bench` and laid over the catalogue when `llmq` and `llmq-models` read it.
-
-TODO:
-
-Still missing compared with private-gpt (also listed in the llmq-index page):
-
-- Streaming and a retrieval route on the gateway.
-- A web UI.
-- Tools, MCP and code execution.
-- Showing a reasoning model’s thinking separately.
+- **Built and tested against test servers, not yet deployed:** llmq-index (needs `services.open-slop.rag` on blade and `nomic-embed-text` on oracle), the capacity rules, and llmq-agent (needs tricorder from its flake on winsmuth; not yet run against a real model or a real tricorder).
+- **Does not exist:** a job queue or runner, the fleet CA the gateway needs, a golden set large enough to judge prompt changes, a streaming or retrieval route on the gateway, a web UI, a PureScript build oracle, and an MCP client.
