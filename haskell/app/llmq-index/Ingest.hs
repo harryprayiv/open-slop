@@ -22,7 +22,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
-import Extract (classify, extract, kindName, skipDir)
+import Extract (classify, extract, kindName, skipDir, structureOf)
 import OpenSlop.Http (Client)
 import OpenSlop.Rag.Embed (Embedder (..), Purpose (ForDocument), embed)
 import OpenSlop.Rag.Split (SplitConfig (..), defaultSplit, embedText, split)
@@ -94,7 +94,7 @@ ingestRoot client conn e o dir = do
                         say ("skip " <> p <> ": " <> why)
                         pure t {failed = t.failed + 1}
                       Right text -> do
-                        let pieces = split cfg text
+                        let pieces = split cfg (structureOf kind) text
                         if o.dryRun
                           then do
                             TIO.putStrLn (p <> "  " <> kindName kind <> "  " <> T.pack (show (length pieces)) <> " chunks")

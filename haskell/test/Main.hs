@@ -25,7 +25,7 @@ import OpenSlop.Gateway.Translate (Call (..), Reply (..), parseBackendReply, pla
 import OpenSlop.OpenAI
 import OpenSlop.Rag.Locality (hostOf, privateHost)
 import OpenSlop.Rag.Retrieve (citedSources)
-import OpenSlop.Rag.Split (Piece (..), SplitConfig (SplitConfig), split)
+import OpenSlop.Rag.Split (Piece (..), SplitConfig (SplitConfig), Structure (..), split)
 import System.Directory (createDirectory, createDirectoryIfMissing, createFileLink, getTemporaryDirectory, removePathForcibly)
 import System.FilePath ((</>))
 import Test.Tasty
@@ -82,6 +82,7 @@ main =
           , testProperty "ordinals are 0..n-1" prop_splitOrdinals
           , testCase "headings become the chunk's path" splitHeadings
           , testCase "a heading inside a code fence is not a heading" splitFence
+          , testCase "a comment in code is not a heading" splitFlat
           , testCase "hosts are read out of URLs" hosts
           , testCase "only LAN hosts are private" locality
           , testCase "citations are read back out of a reply" citations
@@ -337,28 +338,37 @@ cfgOf (t, h) = SplitConfig t h
 
 prop_splitLimit :: Property
 prop_splitLimit = forAll genDoc \d -> forAll genSplit \c ->
-  all (\p -> T.length p.body <= snd c) (split (cfgOf c) d)
+  all (\p -> T.length p.body <= snd c) (split (cfgOf c) Headed d)
 
 prop_splitKeeps :: Property
 prop_splitKeeps = forAll genDoc \d -> forAll genSplit \c ->
-  T.filter (not . isSpace) (T.concat (map (.body) (split (cfgOf c) d))) === T.filter (not . isSpace) d
+  T.filter (not . isSpace) (T.concat (map (.body) (split (cfgOf c) Headed d))) === T.filter (not . isSpace) d
 
 prop_splitOrdinals :: Property
 prop_splitOrdinals = forAll genDoc \d -> forAll genSplit \c ->
-  let ps = split (cfgOf c) d in map (.ordinal) ps === [0 .. length ps - 1]
+  let ps = split (cfgOf c) Headed d in map (.ordinal) ps === [0 .. length ps - 1]
 
 splitHeadings :: Assertion
 splitHeadings = do
   let doc = "intro\n# Install\nfirst\n## NixOS\nsecond\n# Use\nthird\n"
-      ps = split (SplitConfig 1000 1000) doc
+      ps = split (SplitConfig 1000 1000) Headed doc
   map (.heading) ps @?= [[], ["Install"], ["Install", "NixOS"], ["Use"]]
   map (\p -> (p.lineFrom, p.lineTo)) ps @?= [(1, 1), (2, 3), (4, 5), (6, 7)]
 
 splitFence :: Assertion
 splitFence = do
   let doc = "# Real\n```\n# not a heading\n```\nafter\n"
-      ps = split (SplitConfig 1000 1000) doc
+      ps = split (SplitConfig 1000 1000) Headed doc
   map (.heading) ps @?= [["Real"]]
+
+-- The case that mislabelled modules/system/cache.nix: a Nix comment line
+-- read as a level-1 heading.
+splitFlat :: Assertion
+splitFlat = do
+  let doc = "{ config, ... }:\n# the cautionary example of a role\n{\n  port = 8080;\n}\n"
+      ps = split (SplitConfig 1000 1000) Flat doc
+  map (.heading) ps @?= [[]]
+  map (\p -> (p.lineFrom, p.lineTo)) ps @?= [(1, 5)]
 
 hosts :: Assertion
 hosts = do

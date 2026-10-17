@@ -1,13 +1,25 @@
 -- | Cut a document into retrieval chunks.
 --
--- Input is markdown-shaped text: markdown and org sources as converted by
--- pandoc, plain text, or source code. Markdown ATX headings outside fenced
--- code start a new section, and the heading path ("Install > NixOS") goes
--- with every chunk cut from that section, both into the text that is
--- embedded and into the citation. Inside a section, blank-line separated
--- blocks are packed up to the target size; a block larger than the target
--- is cut at line boundaries, and a line larger than the target is cut
--- by characters.
+-- A document is split 'Headed' or 'Flat', and the caller says which.
+--
+-- 'Headed' is for markdown-shaped text: markdown itself, and what pandoc
+-- and pdftotext produce for the converted formats. Markdown ATX headings
+-- outside fenced code start a new section, and the heading path
+-- ("Install > NixOS") goes with every chunk cut from that section, both
+-- into the text that is embedded and into the citation.
+--
+-- 'Flat' is for source code and plain text, where a line starting with
+-- "# " is a comment in Nix, shell, Python, YAML and TOML, not a heading.
+-- Until 2026-10-16 every document was split as markdown, so a Nix comment
+-- became a chunk's heading: modules/system/cache.nix was cited under
+-- "the cautionary example of a role demanding a key that signs nothing.",
+-- one sentence of a comment, and that sentence was embedded with the chunk
+-- and sent to the reranker as if it named the section. A flat document has
+-- one section with no heading.
+--
+-- Either way, inside a section blank-line separated blocks are packed up to
+-- the target size; a block larger than the target is cut at line
+-- boundaries, and a line larger than the target is cut by characters.
 --
 -- Every chunk records the 1-based line range it came from, in the text this
 -- function was given. For a markdown, text or code source that is the file
@@ -20,6 +32,7 @@ module OpenSlop.Rag.Split
   ( Piece (..)
   , SplitConfig (..)
   , defaultSplit
+  , Structure (..)
   , split
   , embedText
   ) where
@@ -68,13 +81,24 @@ data Section = Section
   , slines :: [Line]
   }
 
-split :: SplitConfig -> Text -> [Piece]
-split cfg0 input =
+-- | Whether a document's headings are markdown headings.
+data Structure
+  = Headed
+  -- ^ markdown-shaped: ATX headings outside code fences open sections
+  | Flat
+  -- ^ code or plain text: no line is a heading
+  deriving stock (Eq, Show)
+
+split :: SplitConfig -> Structure -> Text -> [Piece]
+split cfg0 structure input =
   zipWith
     (\i p -> p {ordinal = i})
     [0 ..]
-    (concatMap (packSection cfg) (sections numbered))
+    (concatMap (packSection cfg) grouped)
   where
+    grouped = case structure of
+      Headed -> sections numbered
+      Flat -> [Section {path = [], slines = numbered} | not (null numbered)]
     cfg = cfg0 {hardLimit = max cfg0.target cfg0.hardLimit, target = max 1 cfg0.target}
     numbered = zipWith Line [1 ..] (T.lines (T.replace "\r\n" "\n" input))
 

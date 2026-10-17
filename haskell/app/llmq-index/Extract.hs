@@ -12,6 +12,7 @@
 module Extract
   ( Kind (..)
   , kindName
+  , structureOf
   , classify
   , extract
   , skipDir
@@ -25,6 +26,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Encoding.Error qualified as TE
+import OpenSlop.Rag.Split (Structure (..))
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeExtension, takeFileName)
@@ -46,6 +48,16 @@ kindName = \case
   Code -> "code"
   Converted r -> "pandoc:" <> r
   Pdf -> "pdf"
+
+-- | How a kind's text is split. Markdown and everything converted to it
+-- has headings; in code and plain text a "# " line is a comment.
+structureOf :: Kind -> Structure
+structureOf = \case
+  Markdown -> Headed
+  Converted _ -> Headed
+  Pdf -> Headed
+  PlainText -> Flat
+  Code -> Flat
 
 classify :: FilePath -> Maybe Kind
 classify path = case map toLower (takeExtension path) of
