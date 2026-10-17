@@ -9,8 +9,12 @@
 --      the gateway listen on?"), because the search sees only the question
 --      and a follow-up on its own finds nothing. Without earlier turns the
 --      question is searched as asked.
---   2. 'retrieve' embeds that query and runs the hybrid search, within the
---      scope given, for up to 'depth' candidates.
+--   2. A query that may ask several things ('mayHaveParts') is split by
+--      the chat model into parts that stand alone ('splitParts'), and each
+--      part is searched on its own; see llmq-index's Converse for how the
+--      parts' candidates are merged. 'retrieve' embeds one query and runs
+--      the hybrid search, within the scope given, for up to 'depth'
+--      candidates.
 --   3. 'relevant' drops hits whose vector is far from the question's
 --      compared with the closest hit, the caller keeps at most as many as
 --      it asks for (llmq-index's --sources), and 'packSources' keeps as
@@ -52,6 +56,8 @@ module OpenSlop.Rag.Retrieve
   , relevanceMargin
   , packSources
   , condense
+  , mayHaveParts
+  , splitParts
   , answerStream
   , buildMessages
   , citedSources
@@ -372,6 +378,75 @@ condense client c cap history q = do
     stripThink t = case T.breakOn "</think>" t of
       (_, rest) | not (T.null rest) -> T.drop 8 rest
       _ -> t
+
+-- | Whether a question may ask more than one thing: it joins clauses with
+-- "and", a comma or a semicolon, or has more than one question mark. A
+-- question that does not is searched as it stands, without asking the
+-- model to split it, which saves a model call on most questions.
+mayHaveParts :: Text -> Bool
+mayHaveParts q =
+  any (`T.isInfixOf` T.toLower q) [" and ", ", ", "; "] || T.count "?" q > 1
+
+-- | The separate things a question asks, each rewritten to stand alone, for
+-- searching one at a time.
+--
+-- The search embeds the question as one vector. A question that asks two
+-- things gets a vector between them, and when one part is about something
+-- the files do not contain, the vector is pulled away from the part they
+-- do: on 2026-10-17, "what port does attic use, and what colour is the sky
+-- on oracle?" did not retrieve the chunk that states attic's port, which
+-- the same index ranked second for a question about the port alone.
+-- Searching each part separately keeps one part from hiding the other.
+--
+-- The reply is constrained to a list of one to four strings. A question
+-- that asks one thing comes back as itself. hailo-ollama takes no schema,
+-- so it is not asked, and the question is searched whole.
+splitParts :: Client -> Chat -> Capacity -> Text -> IO (Either Text [Text])
+splitParts _ c _ q | c.engine == HailoOllama = pure (Right [q])
+splitParts client c cap q = do
+  let msgs =
+        [ object
+            [ "role" .= ("system" :: Text)
+            , "content"
+                .= ( "List the separate things the user's question asks, for a search over their files. "
+                       <> "Write each as a question that stands alone, naming its subject in full. "
+                       <> "A question that asks one thing has one entry. Do not answer the question." ::
+                       Text
+                   )
+            ]
+        , object ["role" .= ("user" :: Text), "content" .= q]
+        ]
+      schemaOf =
+        object
+          [ "type" .= ("object" :: Text)
+          , "properties"
+              .= object
+                [ "parts"
+                    .= object
+                      [ "type" .= ("array" :: Text)
+                      , "minItems" .= (1 :: Int)
+                      , "maxItems" .= (4 :: Int)
+                      , "items" .= object ["type" .= ("string" :: Text), "minLength" .= (1 :: Int)]
+                      ]
+                ]
+          , "required" .= ["parts" :: Text]
+          , "additionalProperties" .= False
+          ]
+  out <- newIORef ("" :: Text)
+  r <- streamChat client c cap (plainAsk msgs) {schema = Just schemaOf, outputCap = Just 300} (\t -> modifyIORef' out (<> t)) (const (pure ()))
+  raw <- readIORef out
+  pure case r of
+    Left e -> Left e
+    Right () -> case Aeson.eitherDecodeStrict (TE.encodeUtf8 (T.strip raw)) of
+      Left err -> Left ("the question's parts are not the expected JSON (" <> T.pack err <> ")")
+      Right (Parts ps) -> case filter (not . T.null) (map T.strip ps) of
+        [] -> Right [q]
+        kept -> Right kept
+
+newtype Parts = Parts [Text]
+
+instance FromJSON Parts where
+  parseJSON = withObject "parts" \o -> Parts <$> o .: "parts"
 
 -- | Send one turn, constrained to 'answerSchema', and stream the raw reply
 -- to the callback as it arrives, for progress; the decoded 'Answer' is the

@@ -26,6 +26,8 @@ import Control.Exception (AsyncException (..), throwIO, try)
 import Control.Monad (forM_, unless, when)
 import Data.Aeson (object, toJSON, (.=))
 import Data.List (sortOn)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust)
 import Data.Ord (Down (..))
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text (Text)
@@ -37,7 +39,7 @@ import Numeric (showFFloat)
 import OpenSlop.Capacity (Capacity (..), describeCapacity, learn)
 import OpenSlop.Http (Client)
 import OpenSlop.Rag.Embed (Embedder)
-import OpenSlop.Rag.Rerank (Reranker, rerank, withinMargin)
+import OpenSlop.Rag.Rerank (Reranker, rerank)
 import OpenSlop.Rag.Retrieve
 import OpenSlop.Rag.Store (Connection, Hit (..), addTurn, openSession, sessionTurns)
 import System.Directory (makeAbsolute)
@@ -53,11 +55,15 @@ data Asking = Asking
   , sources :: Int
   -- ^ the most sources one answer is given
   , rerankWith :: Maybe Reranker
-  -- ^ when set, the best 'rerankDepth' candidates are reordered by it and
-  -- 'relevant' is not used
+  -- ^ when set, the best 'rerankDepth' candidates are reordered by it;
+  -- without one, candidates are cut by similarity, 'relevanceMargin' below
+  -- their part's best
   , rerankDepth :: Int
   , rerankMargin :: Double
-  -- ^ reranked candidates scoring more than this below the best are dropped
+  -- ^ reranked candidates scoring more than this below their part's best
+  -- are dropped
+  , splitQuestions :: Bool
+  -- ^ split a question that may ask several things and search each part
   , maxWait :: Maybe Double
   , scope :: IORef [Text]
   }
@@ -69,17 +75,28 @@ say = TIO.hPutStrLn stderr . ("llmq-index: " <>)
 data Selection = Selection
   { query :: Text
   -- ^ the question as searched, after rewriting against the history
+  , searched :: [Text]
+  -- ^ the parts searched separately; the query alone when it was not split
   , ranked :: [(Hit, Double)]
-  -- ^ the candidates the cut was made from, best first, with the score it
-  -- was made on: the reranker's when there is one, else similarity
+  -- ^ every part's candidates, best first, each scored relative to the
+  -- best candidate of its own part (so each part's best is 0): the
+  -- reranker's score with a reranker, else similarity
   , kept :: [Hit]
   -- ^ those within the margin, at most --sources
   , packed :: [Hit]
   -- ^ those of 'kept' that fit the model's capacity; what the model is given
   }
 
--- | Rewrite against the history, retrieve, choose and pack. Returns the
--- sources the model would be given, or why there are none.
+-- | Rewrite against the history, split into parts, retrieve and score
+-- each part, merge, choose and pack. Returns the sources the model would
+-- be given, or why there are none.
+--
+-- Each part's scores are taken relative to that part's best candidate
+-- before the parts are merged, so the margin is applied within each part:
+-- a part whose best answer the reranker scores low is not cut because
+-- another part's answer scores high. The reranker's depth is shared
+-- between the parts, at least 8 each, so a two-part question costs about
+-- what one part did.
 select :: Asking -> [(Text, Text)] -> Text -> IO (Either Text Selection)
 select a history question = do
   cap <- readIORef a.capacity
@@ -88,18 +105,84 @@ select a history question = do
     Left e -> pure (Left e)
     Right q -> do
       when (q /= question) (say ("searching for: " <> q))
+      parts <-
+        if a.splitQuestions && mayHaveParts q
+          then
+            splitParts a.client a.chatTo cap q >>= \case
+              Left e -> say ("not split (" <> e <> "); searching the question whole") >> pure [q]
+              Right ps -> pure ps
+          else pure [q]
+      when (length parts > 1) (say ("searching " <> T.pack (show (length parts)) <> " parts: " <> T.intercalate " | " parts))
       sc <- readIORef a.scope
-      found <- retrieve a.client a.conn a.embedWith Retrieval {depth = a.depth, limit = 2 * a.depth, scope = sc} q
-      case found of
+      let depthEach = if length parts > 1 then max 8 (a.rerankDepth `div` length parts) else a.rerankDepth
+      scored <- traverse (scorePart a sc depthEach) parts
+      case sequence scored of
         Left e -> pure (Left e)
-        Right [] -> pure (Left (if null sc then "nothing in the index matches that question" else "nothing under " <> T.intercalate ", " sc <> " matches that question"))
-        Right hits ->
-          chosen a q hits >>= \case
-            Left e -> pure (Left e)
-            Right (ranked, kept) -> do
-              let packed = packSources cap a.maxWait (historyChars cap a.maxWait history question) kept
-              say (T.pack (show (length packed)) <> " of " <> T.pack (show (length kept)) <> " fit")
-              pure (Right Selection {query = q, ranked, kept, packed})
+        Right perPart
+          | all null perPart -> pure (Left (if null sc then "nothing in the index matches that question" else "nothing under " <> T.intercalate ", " sc <> " matches that question"))
+          | otherwise -> do
+              let ranked = mergeParts perPart
+                  margin = maybe relevanceMargin (const a.rerankMargin) a.rerankWith
+                  close = [h | (h, s) <- ranked, s >= negate margin]
+                  kept = take a.sources close
+                  packed = packSources cap a.maxWait (historyChars cap a.maxWait history question) kept
+              say
+                ( T.pack (show (length close))
+                    <> " within "
+                    <> T.pack (showFFloat (Just 2) margin "")
+                    <> " of their part's best ("
+                    <> (if isJust a.rerankWith then "--rerank-margin" else "similarity")
+                    <> "), kept "
+                    <> T.pack (show (length kept))
+                    <> " (--sources "
+                    <> T.pack (show a.sources)
+                    <> "), "
+                    <> T.pack (show (length packed))
+                    <> " fit"
+                )
+              pure (Right Selection {query = q, searched = parts, ranked, kept, packed})
+
+-- | One part's candidates, best first, scored relative to the best.
+scorePart :: Asking -> [Text] -> Int -> Text -> IO (Either Text [(Hit, Double)])
+scorePart a sc depthEach part =
+  retrieve a.client a.conn a.embedWith Retrieval {depth = a.depth, limit = 2 * a.depth, scope = sc} part >>= \case
+    Left e -> pure (Left e)
+    Right [] -> pure (Right [])
+    Right hits -> case a.rerankWith of
+      Nothing -> pure (Right (relative (sortOn (Down . snd) [(h, h.similarity) | h <- hits])))
+      Just rr -> do
+        let candidates = take depthEach hits
+        t0 <- getCurrentTime
+        r <- rerank a.client rr part candidates
+        t1 <- getCurrentTime
+        case r of
+          Left e -> pure (Left e)
+          Right scored -> do
+            say
+              ( "reranked the best "
+                  <> T.pack (show (length candidates))
+                  <> " of "
+                  <> T.pack (show (length hits))
+                  <> " for \""
+                  <> T.take 60 part
+                  <> "\" in "
+                  <> T.pack (showFFloat (Just 1) (realToFrac (diffUTCTime t1 t0) :: Double) "")
+                  <> " s, scores "
+                  <> T.intercalate " " [T.pack (showFFloat (Just 2) s "") | (_, s) <- take 6 scored]
+              )
+            pure (Right (relative scored))
+  where
+    relative = \case
+      [] -> []
+      xs@((_, best) : _) -> [(h, s - best) | (h, s) <- xs]
+
+-- | The parts' candidates as one list, best first, a chunk found by more
+-- than one part kept once with its best score.
+mergeParts :: [[(Hit, Double)]] -> [(Hit, Double)]
+mergeParts perPart = sortOn (Down . snd) (Map.elems (Map.fromListWith better [(key h, (h, s)) | (h, s) <- concat perPart]))
+  where
+    key h = (h.path, h.lineFrom, h.lineTo)
+    better x y = if snd x >= snd y then x else y
 
 -- | Ask the model, constrained to the answer schema, with the sources
 -- given, and learn from the token count the server reports. The raw reply
@@ -127,55 +210,6 @@ turn a history question =
       TIO.hPutStrLn stderr ""
       forM_ r \ans -> TIO.putStrLn ans.text >> showSources ans
       pure r
-
--- | The candidates scored best first, and those kept: reranked when there
--- is a reranker, cut by similarity when there is not, and at most
--- --sources.
-chosen :: Asking -> Text -> [Hit] -> IO (Either Text ([(Hit, Double)], [Hit]))
-chosen a q hits = case a.rerankWith of
-  Nothing -> do
-    let good = relevant hits
-        kept = take a.sources good
-    say
-      ( T.pack (show (length good))
-          <> " relevant of "
-          <> T.pack (show (length hits))
-          <> " found by similarity, "
-          <> T.pack (show (length kept))
-          <> " kept (--sources "
-          <> T.pack (show a.sources)
-          <> ")"
-      )
-    pure (Right (sortOn (Down . snd) [(h, h.similarity) | h <- hits], kept))
-  Just rr -> do
-    let candidates = take a.rerankDepth hits
-    t0 <- getCurrentTime
-    r <- rerank a.client rr q candidates
-    t1 <- getCurrentTime
-    case r of
-      Left e -> pure (Left e)
-      Right scored -> do
-        let close = withinMargin a.rerankMargin scored
-            kept = take a.sources close
-        say
-          ( "reranked the best "
-              <> T.pack (show (length candidates))
-              <> " of "
-              <> T.pack (show (length hits))
-              <> " found in "
-              <> T.pack (showFFloat (Just 1) (realToFrac (diffUTCTime t1 t0) :: Double) "")
-              <> " s; "
-              <> T.pack (show (length close))
-              <> " within "
-              <> T.pack (showFFloat (Just 1) a.rerankMargin "")
-              <> " of the best (--rerank-margin), kept "
-              <> T.pack (show (length kept))
-              <> " (--sources "
-              <> T.pack (show a.sources)
-              <> "), scores "
-              <> T.intercalate " " [T.pack (showFFloat (Just 2) s "") | (_, s) <- kept]
-          )
-        pure (Right (scored, map fst kept))
 
 showSources :: Answer -> IO ()
 showSources ans = do
