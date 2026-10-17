@@ -2,15 +2,13 @@
 -- llama-server started with --reranking.
 --
 -- The embedding search scores a chunk by how close its vector is to the
--- question's, and each vector was made without seeing the other text. On a
--- repository where every chunk is about the same machines, that puts them
--- all within a few hundredths of each other: measured 2026-10-16 on
--- neoblade-config with nomic-embed-text, the chunk that answered "which
--- machine holds the binary cache, and on what port?" scored 0.660 and an
--- unrelated chunk about a cached homebeacon verdict scored 0.637. A
--- reranker reads the question and the chunk together and scores whether
--- the chunk answers the question, which is the distinction the embedding
--- cannot make.
+-- question's, and each vector was made without seeing the other text. In a
+-- corpus where every chunk is about the same few subjects, that can put the
+-- chunk that answers a question and an unrelated one within a few
+-- hundredths of each other; on the first index it was tried on, the gap was
+-- 0.02. A reranker reads the question and the chunk together and scores
+-- whether the chunk answers the question, which is the distinction the
+-- embedding cannot make.
 --
 -- It is slow in proportion to the text it reads, so only the best few
 -- candidates of the hybrid search are sent (llmq-index's --rerank-depth),
@@ -58,13 +56,12 @@ documentChars :: Int
 documentChars = 2400
 
 -- | The reranked hits scoring no more than the margin below the best, in
--- order. bge-reranker's scores are logits, not probabilities: on
--- 2026-10-16 the two chunks that answered a question about the binary cache
--- scored -0.87 and -1.53, and the next, unrelated, -3.82. The four sent
--- with them by --sources 6 alone could only mislead the model, and one did:
--- it named oracle, whose chunk was sixth, as the machine. A margin is used
--- rather than a fixed floor because the scale of the best score moves with
--- the question; the gap between an answer and a non-answer is what stays.
+-- order. bge-reranker's scores are logits, not probabilities, and their
+-- scale moves with the question, so the cut is a margin below the best
+-- rather than a fixed floor. Without a cut, --sources alone fills the
+-- prompt with unrelated chunks, and a model will answer from them. The
+-- default margin (llmq-index's --rerank-margin) was chosen by hand on one
+-- index and is a starting value until an evaluation sets it.
 withinMargin :: Double -> [(a, Double)] -> [(a, Double)]
 withinMargin _ [] = []
 withinMargin margin scored@((_, best) : _) = takeWhile (\(_, s) -> s >= best - margin) scored

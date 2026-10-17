@@ -28,11 +28,11 @@
 --      numbers after each claim.
 --
 -- Until 2026-10-17 the answer was free text and 'citedSources' read the
--- numbers back out of it afterwards. A 7B often wrote none, and when it
--- wrote one it covered the whole answer: "blade, port 8080 [1]" cited the
--- source for the port and not the one that named blade. Checking after the
--- fact could only warn; the schema makes every claim carry its own sources
--- in the same way the agent's decisions are typed (OpenSlop.Agent.Action).
+-- numbers back out of it afterwards. Small models often wrote none, and
+-- when they wrote one it covered the whole answer, so a fact from one
+-- source was credited to another. Checking after the fact could only
+-- warn; the schema makes every claim carry its own sources in the same way
+-- the agent's decisions are typed (OpenSlop.Agent.Action).
 -- 'citedSources' stays for reading numbers out of earlier free-text turns.
 --
 -- Every server here is a 'Lan'; see "OpenSlop.Rag.Locality". The request
@@ -146,11 +146,13 @@ data Answer = Answer
 -- number); or no claims and a gap that is not empty. A part therefore
 -- cannot be left both unanswered and unexplained.
 --
--- This replaced a single list of claims on 2026-10-17. Asked "which machine
--- holds the binary cache, and on what port?", the 7B answered the port,
--- left the machine out and left the gap empty, though the source naming
--- the machine was among those it was given. Writing each part of the
--- question before answering it makes the model account for every part.
+-- This replaced a single list of claims on 2026-10-17. With one list, a
+-- model asked a two-part question could answer one part, leave the other
+-- out and leave the gap empty. Writing each part of the question before
+-- answering it makes the model account for every part. The schema cannot
+-- make the model split the question correctly: it can still write one part
+-- that covers two things, and only an evaluation over several corpora shows
+-- how often it does.
 answerSchema :: Int -> Value
 answerSchema n =
   object
@@ -246,8 +248,9 @@ instructions :: Text
 instructions =
   T.unlines
     [ "You answer questions about the user's own files using the numbered sources below."
-    , "Reply with JSON. parts has one entry for each thing the question asks: a question with two parts (\"which machine, and on what port?\") has two entries."
-    , "In each part, ask restates that one thing; claims are statements answering it, each with the numbers of the sources it comes from; gap says what the sources do not tell about it, or is empty."
+    , "Reply with JSON. parts has one entry for each separate thing the user's question asks. A question that asks two things gets two parts; never put two things in one part."
+    , "In each part, ask is that one thing, in the words of the user's question; claims are statements answering it, each with the numbers of the sources it comes from; gap says what the sources do not tell about it, or is empty."
+    , "Write each claim as a complete sentence in your own words that names what it is about, not a fragment copied from a source."
     , "Give one claim per fact, so each claim lists the sources for that fact alone. Read every source before deciding a part is not answered."
     , "Only state what a source says. If the sources do not answer a part, give it no claims and say what is missing in its gap; do not guess."
     , "Earlier turns of the conversation are context, not sources."
@@ -274,11 +277,9 @@ renderSource n h =
 -- This replaced a cut on the fused score (rank in the top ten of either
 -- half), which could not reject anything: the word half matches any of the
 -- question's words, so every candidate ranks somewhere, and with --depth 10
--- every one of them was "in the top ten". On 2026-10-16 that sent 19 of 19
--- candidates for "which machine holds the binary cache, and on what port?",
--- homebeacon and seedbox chunks among them, and the 7B answered without
--- citing any. Similarity is a measure of closeness rather than of rank, so
--- a candidate the word half found only because it contains "machine" is
+-- every one of them was "in the top ten", so nothing was ever dropped.
+-- Similarity measures closeness rather than rank, so a candidate the word
+-- half found only because it shares one common word with the question is
 -- dropped.
 --
 -- The margin is relative because absolute similarities depend on the
@@ -294,7 +295,8 @@ relevant hits = case hits of
     best = maximum (map (.similarity) hits)
 
 -- | How far below the closest hit's similarity a hit may be and still be
--- sent to the model.
+-- sent to the model. Chosen by hand on one index with one embedding model,
+-- so it is a starting value until an evaluation sets it.
 relevanceMargin :: Double
 relevanceMargin = 0.08
 
