@@ -159,6 +159,8 @@ showSources ans = do
           <> (if T.null h.heading then "" else "  " <> h.heading)
       )
   when (null ans.claims) (say "the answer makes no claim from your files")
+  let open = [p.ask | p <- ans.parts, null p.claims]
+  unless (null ans.claims || null open) (say ("not answered from your files: " <> T.intercalate "; " open))
   unless (null ans.invented) (say ("the answer cites sources it was not given: " <> T.pack (show ans.invented)))
 
 askOnce :: Asking -> Text -> IO Bool

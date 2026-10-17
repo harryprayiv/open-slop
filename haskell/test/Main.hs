@@ -25,7 +25,7 @@ import OpenSlop.Gateway.Translate (Call (..), Reply (..), parseBackendReply, pla
 import OpenSlop.OpenAI
 import OpenSlop.Rag.Exclude (excluded, parsePatterns, secretKind)
 import OpenSlop.Rag.Locality (hostOf, privateHost)
-import OpenSlop.Rag.Retrieve (Claim (..), answerSchema, citedSources, decodeAnswer, renderAnswer)
+import OpenSlop.Rag.Retrieve (Claim (..), Part (..), answerSchema, citedSources, decodeAnswer, renderAnswer)
 import OpenSlop.Rag.Split (Piece (..), SplitConfig (SplitConfig), Structure (..), split)
 import System.Directory (createDirectory, createDirectoryIfMissing, createFileLink, getTemporaryDirectory, removePathForcibly)
 import System.FilePath ((</>))
@@ -420,21 +420,33 @@ citations = do
 -- llama.cpp's converter.
 answers :: Assertion
 answers = do
-  let reply = "{\"claims\":[{\"claim\":\"The cache runs on blade.\",\"sources\":[3]},{\"claim\":\"It listens on port 8080.\",\"sources\":[1,2]}],\"gaps\":\"\"}"
+  let reply = "{\"parts\":[{\"ask\":\"Which machine?\",\"claims\":[{\"claim\":\"Blade.\",\"sources\":[3]}],\"gap\":\"\"},{\"ask\":\"What port?\",\"claims\":[{\"claim\":\"8080.\",\"sources\":[1,2]}],\"gap\":\"\"}]}"
   case decodeAnswer 3 reply of
     Left e -> assertFailure (T.unpack e)
-    Right (cs, g, cited, invented) -> do
-      map (.sources) cs @?= [[3], [1, 2]]
-      (g, cited, invented) @?= ("", [1, 2, 3], [])
-      renderAnswer cs g @?= "The cache runs on blade. [3]\nIt listens on port 8080. [1][2]"
-  case decodeAnswer 2 "{\"claims\":[{\"claim\":\"x\",\"sources\":[5]}],\"gaps\":\"\"}" of
-    Right (_, _, _, invented) -> invented @?= [5]
+    Right (ps, cited, invented) -> do
+      map (map (.sources) . (.claims)) ps @?= [[[3]], [[1, 2]]]
+      (cited, invented) @?= ([1, 2, 3], [])
+      renderAnswer ps @?= "Which machine?\n  Blade. [3]\nWhat port?\n  8080. [1][2]"
+  case decodeAnswer 2 "{\"parts\":[{\"ask\":\"Sky?\",\"claims\":[],\"gap\":\" no colour \"}]}" of
+    Right (ps, _, _) -> renderAnswer ps @?= "Not in the sources: no colour"
+    Left e -> assertFailure (T.unpack e)
+  case decodeAnswer 2 "{\"parts\":[{\"ask\":\"x\",\"claims\":[{\"claim\":\"y\",\"sources\":[5]}],\"gap\":\"\"}]}" of
+    Right (_, _, invented) -> invented @?= [5]
     Left e -> assertFailure (T.unpack e)
   assertBool "prose is refused" (isLeft (decodeAnswer 2 "The cache runs on blade [1]."))
-  let items = field "properties" (answerSchema 4) >>= field "claims" >>= field "items" >>= field "properties" >>= field "sources"
-  (items >>= field "items" >>= field "enum") @?= Just (Aeson.toJSON [1 .. 4 :: Int])
-  (items >>= field "minItems") @?= Just (Number 1)
-  (field "properties" (answerSchema 0) >>= field "claims" >>= field "maxItems") @?= Just (Number 0)
+  let alts n = case field "properties" (answerSchema n) >>= field "parts" >>= field "items" >>= field "anyOf" of
+        Just (Array xs) -> toList xs
+        _ -> []
+      claimsOf a = field "properties" a >>= field "claims"
+  length (alts 4) @?= 2
+  case alts 4 of
+    [answered, unanswered] -> do
+      (claimsOf answered >>= field "minItems") @?= Just (Number 1)
+      (claimsOf answered >>= field "items" >>= field "properties" >>= field "sources" >>= field "items" >>= field "enum") @?= Just (Aeson.toJSON [1 .. 4 :: Int])
+      (claimsOf unanswered >>= field "maxItems") @?= Just (Number 0)
+      (field "properties" unanswered >>= field "gap" >>= field "minLength") @?= Just (Number 1)
+    _ -> assertFailure "two shapes of part"
+  length (alts 0) @?= 1
 
 -- ---------------------------------------------------------------------------
 -- capacity

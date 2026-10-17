@@ -17,12 +17,13 @@
 --      many of those as the model's capacity leaves room for after the
 --      conversation and the answer.
 --   4. 'answerStream' sends the instructions with the numbered sources, the
---      earlier turns and the question, constrained to 'answerSchema': a
---      list of claims, each with the numbers of the sources it comes from,
---      and a note of what the sources do not say. The server turns the
---      schema into a grammar, so a claim without a source, or a source
---      number that was not given, cannot be produced at all. Answers are
---      not capped; see "OpenSlop.Capacity".
+--      earlier turns and the question, constrained to 'answerSchema': one
+--      part for each thing the question asks, each with claims citing the
+--      sources they come from, or with a gap saying what the sources lack.
+--      The server turns the schema into a grammar, so a claim without a
+--      source, a source number that was not given, or a part with neither
+--      a claim nor a gap cannot be produced at all. Answers are not capped;
+--      see "OpenSlop.Capacity".
 --   5. The reply is decoded into an 'Answer' and rendered as text with the
 --      numbers after each claim.
 --
@@ -42,6 +43,7 @@ module OpenSlop.Rag.Retrieve
   , Chat (..)
   , Answer (..)
   , Claim (..)
+  , Part (..)
   , answerSchema
   , decodeAnswer
   , renderAnswer
@@ -100,17 +102,31 @@ data Claim = Claim
 instance FromJSON Claim where
   parseJSON = withObject "claim" \o -> Claim <$> o .: "claim" <*> o .: "sources"
 
-data Reply = Reply [Claim] Text
+-- | One thing the question asks, and its answer: claims with sources, or
+-- an empty list and a gap saying what the sources lack. Named so that the
+-- grammar has the model write the question part first ("ask" sorts before
+-- "claims" and "gap"), then answer it.
+data Part = Part
+  { ask :: Text
+  , claims :: [Claim]
+  , gap :: Text
+  }
+  deriving stock (Eq, Show)
+
+instance FromJSON Part where
+  parseJSON = withObject "part" \o -> Part <$> o .: "ask" <*> o .: "claims" <*> o .: "gap"
+
+newtype Reply = Reply [Part]
 
 instance FromJSON Reply where
-  parseJSON = withObject "answer" \o -> Reply <$> o .: "claims" <*> o .: "gaps"
+  parseJSON = withObject "answer" \o -> Reply <$> o .: "parts"
 
 data Answer = Answer
   { text :: Text
-  -- ^ the claims rendered, each followed by its source numbers
+  -- ^ the parts rendered, each claim followed by its source numbers
+  , parts :: [Part]
   , claims :: [Claim]
-  , gaps :: Text
-  -- ^ what the model says the sources do not contain; empty when nothing
+  -- ^ every part's claims, in order
   , sources :: [Hit]
   , cited :: [Int]
   -- ^ source numbers the claims cite, 1-based, in the range given
@@ -122,78 +138,118 @@ data Answer = Answer
   , promptChars :: Int
   }
 
--- | The JSON Schema an answer from n sources must match. Every claim names
--- at least one source, and a source is one of the numbers 1..n, as an enum
--- so the grammar cannot produce any other. With no sources the claims list
--- must be empty, and gaps says why.
+-- | The JSON Schema an answer from n sources must match.
+--
+-- The answer is a list of parts, one for each thing the question asks.
+-- Each part is one of two shapes: at least one claim, each naming at least
+-- one source from 1..n (an enum, so the grammar cannot produce another
+-- number); or no claims and a gap that is not empty. A part therefore
+-- cannot be left both unanswered and unexplained.
+--
+-- This replaced a single list of claims on 2026-10-17. Asked "which machine
+-- holds the binary cache, and on what port?", the 7B answered the port,
+-- left the machine out and left the gap empty, though the source naming
+-- the machine was among those it was given. Writing each part of the
+-- question before answering it makes the model account for every part.
 answerSchema :: Int -> Value
 answerSchema n =
   object
     [ "type" .= ("object" :: Text)
     , "properties"
         .= object
-          [ "claims"
+          [ "parts"
               .= object
-                ( [ "type" .= ("array" :: Text)
-                  , "items"
-                      .= object
-                        [ "type" .= ("object" :: Text)
-                        , "properties"
-                            .= object
-                              [ "claim" .= object ["type" .= ("string" :: Text)]
-                              , "sources"
-                                  .= object
-                                    [ "type" .= ("array" :: Text)
-                                    , "items" .= object ["enum" .= [1 .. max 1 n]]
-                                    , "minItems" .= (1 :: Int)
-                                    ]
-                              ]
-                        , "required" .= ["claim", "sources" :: Text]
-                        , "additionalProperties" .= False
-                        ]
-                  ]
-                    <> ["maxItems" .= (0 :: Int) | n < 1]
-                )
-          , "gaps" .= object ["type" .= ("string" :: Text)]
+                [ "type" .= ("array" :: Text)
+                , "minItems" .= (1 :: Int)
+                , "items" .= object ["anyOf" .= ([answered | n >= 1] <> [unanswered])]
+                ]
           ]
-    , "required" .= ["claims", "gaps" :: Text]
+    , "required" .= ["parts" :: Text]
     , "additionalProperties" .= False
     ]
+  where
+    part claimsSchema gapSchema =
+      object
+        [ "type" .= ("object" :: Text)
+        , "properties"
+            .= object
+              [ "ask" .= object ["type" .= ("string" :: Text), "minLength" .= (1 :: Int)]
+              , "claims" .= claimsSchema
+              , "gap" .= gapSchema
+              ]
+        , "required" .= ["ask", "claims", "gap" :: Text]
+        , "additionalProperties" .= False
+        ]
+    answered =
+      part
+        ( object
+            [ "type" .= ("array" :: Text)
+            , "minItems" .= (1 :: Int)
+            , "items" .= claimSchema
+            ]
+        )
+        (object ["type" .= ("string" :: Text)])
+    unanswered =
+      part
+        (object ["type" .= ("array" :: Text), "maxItems" .= (0 :: Int)])
+        (object ["type" .= ("string" :: Text), "minLength" .= (1 :: Int)])
+    claimSchema =
+      object
+        [ "type" .= ("object" :: Text)
+        , "properties"
+            .= object
+              [ "claim" .= object ["type" .= ("string" :: Text), "minLength" .= (1 :: Int)]
+              , "sources"
+                  .= object
+                    [ "type" .= ("array" :: Text)
+                    , "items" .= object ["enum" .= [1 .. max 1 n]]
+                    , "minItems" .= (1 :: Int)
+                    ]
+              ]
+        , "required" .= ["claim", "sources" :: Text]
+        , "additionalProperties" .= False
+        ]
 
--- | The reply, read against the number of sources given. A code fence
--- around it is tolerated; anything that is not the schema's shape is an
--- error with the start of what came back.
-decodeAnswer :: Int -> Text -> Either Text ([Claim], Text, [Int], [Int])
+-- | The reply, read against the number of sources given: its parts, and
+-- the source numbers cited in range and out of it. A code fence around it
+-- is tolerated; anything that is not the schema's shape is an error with
+-- the start of what came back.
+decodeAnswer :: Int -> Text -> Either Text ([Part], [Int], [Int])
 decodeAnswer n raw =
   case Aeson.eitherDecodeStrict (TE.encodeUtf8 (unfence (T.strip raw))) of
     Left err -> Left ("the answer is not the expected JSON (" <> T.pack err <> "): " <> T.take 200 raw)
-    Right (Reply cs g) ->
-      let ns = sort (nub (concatMap (.sources) cs))
+    Right (Reply ps) ->
+      let cleaned = [p {gap = T.strip p.gap} | p <- ps]
+          ns = sort (nub (concatMap (.sources) (concatMap (.claims) cleaned)))
           inRange k = k >= 1 && k <= n
-       in Right (cs, T.strip g, filter inRange ns, filter (not . inRange) ns)
+       in Right (cleaned, filter inRange ns, filter (not . inRange) ns)
   where
     unfence t
       | "```" `T.isPrefixOf` t = T.strip (T.dropWhileEnd (== '`') (T.dropWhile (/= '\n') t))
       | otherwise = t
 
--- | Each claim on its own line with its sources, then the gaps.
-renderAnswer :: [Claim] -> Text -> Text
-renderAnswer cs g =
-  T.intercalate
-    "\n"
-    ( [ c.claim <> " " <> T.concat ["[" <> T.pack (show k) <> "]" | k <- c.sources]
-      | c <- cs
+-- | Each part as its question, then its claims with their sources, then
+-- what the sources do not say about it. A question with one part is shown
+-- without the question repeated.
+renderAnswer :: [Part] -> Text
+renderAnswer = \case
+  [p] -> T.intercalate "\n" (body "" p)
+  ps -> T.intercalate "\n" (concatMap (\p -> p.ask : body "  " p) ps)
+  where
+    body indent p =
+      [ indent <> c.claim <> " " <> T.concat ["[" <> T.pack (show k) <> "]" | k <- c.sources]
+      | c <- p.claims
       ]
-        <> ["Not in the sources: " <> g | not (T.null g)]
-    )
+        <> [indent <> "Not in the sources: " <> p.gap | not (T.null p.gap)]
 
 instructions :: Text
 instructions =
   T.unlines
     [ "You answer questions about the user's own files using the numbered sources below."
-    , "Reply with JSON: claims is a list of statements, each with the numbers of the sources it comes from; gaps says what the question asks that the sources do not contain, or is empty."
-    , "Split the answer into one claim per fact, so each claim lists the sources for that fact alone."
-    , "Only state what a source says. If the sources do not contain the answer, give no claims and say so in gaps; do not guess."
+    , "Reply with JSON. parts has one entry for each thing the question asks: a question with two parts (\"which machine, and on what port?\") has two entries."
+    , "In each part, ask restates that one thing; claims are statements answering it, each with the numbers of the sources it comes from; gap says what the sources do not tell about it, or is empty."
+    , "Give one claim per fact, so each claim lists the sources for that fact alone. Read every source before deciding a part is not answered."
+    , "Only state what a source says. If the sources do not answer a part, give it no claims and say what is missing in its gap; do not guess."
     , "Earlier turns of the conversation are context, not sources."
     ]
 
@@ -340,8 +396,8 @@ answerStream client c cap maxWait history question hits onText = do
   pure case r of
     Left e -> Left e
     Right () -> do
-      (claims, gaps, cited, invented) <- decodeAnswer (length hits) raw
-      Right Answer {text = renderAnswer claims gaps, claims, gaps, sources = hits, cited, invented, promptTokens = pt, promptChars = chars}
+      (parts, cited, invented) <- decodeAnswer (length hits) raw
+      Right Answer {text = renderAnswer parts, parts, claims = concatMap (.claims) parts, sources = hits, cited, invented, promptTokens = pt, promptChars = chars}
 
 -- | Which cited numbers were given and which were not.
 judgeCitations :: Int -> Text -> ([Int], [Int])
