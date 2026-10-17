@@ -41,6 +41,16 @@
 -- margins should be chosen from: the largest "below best" among chunks
 -- that answer is the smallest margin that keeps them all.
 --
+-- When an expected chunk did not rank first, the candidates that ranked
+-- above it are printed with their scores, so a wrong case, a chunk that
+-- should have been left out of the index, and a retrieval miss can be told
+-- apart.
+--
+-- With a reranker, the summary ends with a margin sweep: for each margin,
+-- how many expected chunks it would have kept and how many sources it
+-- would have sent on average, computed from the scores this run already
+-- has, so choosing --rerank-margin needs no second run.
+--
 -- --retrieval-only stops before the chat model, which makes a run several
 -- times faster and is enough to set the margins and the depth.
 module Eval
@@ -107,6 +117,14 @@ data Fate = Fate
   -- ^ Nothing when no answer was asked for
   }
 
+-- | One question's candidates: the first few as "path:lines" with their
+-- scores, and how far below the best each candidate's score is, for the
+-- margin sweep.
+data Field = Field
+  { top :: [(Text, Double)]
+  , belowAll :: [Double]
+  }
+
 -- | What happened to one question's answer.
 data Outcome = Outcome
   { parts :: Int
@@ -139,8 +157,12 @@ runEval a o = do
         r <- one a o c
         case r of
           Left e -> TIO.putStrLn ("  error: " <> e) >> pure Nothing
-          Right (fates, outcome) -> do
+          Right (fates, field, outcome) -> do
             forM_ (zip c.expect fates) \(e, f) -> TIO.putStrLn ("  " <> describeFate e f)
+            let firstRank = minimum (maxBound : [k | Just k <- map (.rank) fates])
+            when (not (null fates) && firstRank /= 1) $
+              forM_ (take (min 3 (firstRank - 1)) field.top) \(where_, s) ->
+                TIO.putStrLn ("    above it: " <> fixed 2 s <> "  " <> where_)
             forM_ outcome \out ->
               TIO.putStrLn
                 ( "  answer: "
@@ -154,15 +176,15 @@ runEval a o = do
                     <> fixed 1 out.seconds
                     <> " s"
                 )
-            pure (Just (c, fates, outcome))
-      summarise (catMaybes results) (length cs)
+            pure (Just (c, fates, field, outcome))
+      summarise (isJust a.rerankWith) a.sources (catMaybes results) (length cs)
       pure True
 
-one :: Asking -> EvalOpts -> Case -> IO (Either Text ([Fate], Maybe Outcome))
+one :: Asking -> EvalOpts -> Case -> IO (Either Text ([Fate], Field, Maybe Outcome))
 one a o c =
   select a [] c.question >>= \case
     Left e
-      | null c.expect -> pure (Right ([], if o.retrievalOnly then Nothing else Just Outcome {parts = 0, gaps = c.missing, seconds = 0}))
+      | null c.expect -> pure (Right ([], Field [] [], if o.retrievalOnly then Nothing else Just Outcome {parts = 0, gaps = c.missing, seconds = 0}))
       | otherwise -> pure (Left e)
     Right sel -> do
       answered <-
@@ -198,7 +220,12 @@ one a o c =
                       Outcome {parts = length an.parts, gaps = length [p | p <- an.parts, null p.claims], seconds = secs}
                   )
                   ans
-          pure (Right (map fate (zip c.expect counts), outcome))
+              field =
+                Field
+                  { top = [(h.path <> ":" <> tshow h.lineFrom <> "-" <> tshow h.lineTo, s) | (h, s) <- take 3 sel.ranked]
+                  , belowAll = [best - s | (_, s) <- sel.ranked]
+                  }
+          pure (Right (map fate (zip c.expect counts), field, outcome))
 
 describeFate :: Expect -> Fate -> Text
 describeFate e f =
@@ -221,16 +248,16 @@ describeFate e f =
             Just True -> ", cited"
             Just False -> if f.sent then ", NOT CITED" else ""
 
-summarise :: [(Case, [Fate], Maybe Outcome)] -> Int -> IO ()
-summarise rs total = do
-  let allFates = concat [fs | (_, fs, _) <- rs]
+summarise :: Bool -> Int -> [(Case, [Fate], Field, Maybe Outcome)] -> Int -> IO ()
+summarise reranked most rs total = do
+  let allFates = concat [fs | (_, fs, _, _) <- rs]
       fates = [f | f <- allFates, f.indexed > 0]
       wrong = length allFates - length fates
       n = length fates
       count p = length (filter p fates)
       ratio k = tshow k <> "/" <> tshow n
       belows = catMaybes [f.below | f <- fates]
-      answered = [(c, out) | (c, _, Just out) <- rs]
+      answered = [(c, out) | (c, _, _, Just out) <- rs]
       gapsRight = length [() | (c, out) <- answered, out.gaps == c.missing]
       partial = [(c, out) | (c, out) <- answered, c.missing > 0]
   TIO.putStrLn ""
@@ -251,6 +278,22 @@ summarise rs total = do
           <> fixed 2 (sum belows / fromIntegral (length belows))
           <> "; a margin under the largest drops at least one answering chunk"
       )
+  when (reranked && not (null belows)) $ do
+    TIO.putStrLn ("margin sweep (--rerank-margin, with --sources " <> tshow most <> "):")
+    forM_ [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0] \m -> do
+      let keeps = length [() | f <- fates, Just b <- [f.below], Just k <- [f.rank], b <= m, k <= most]
+          sent = [min most (length (filter (<= m) fl.belowAll)) | (_, fs, fl, _) <- rs, not (null fs)]
+          meanSent = fromIntegral (sum sent) / fromIntegral (max 1 (length sent)) :: Double
+      TIO.putStrLn
+        ( "  "
+            <> fixed 1 m
+            <> ": keeps "
+            <> ratio keeps
+            <> " expected chunks, sends "
+            <> fixed 1 meanSent
+            <> " sources on average"
+        )
+    TIO.putStrLn "  (an expected chunk counts as kept when it is within the margin and among the best --sources)"
   when (not (null answered)) $ do
     TIO.putStrLn ("answers with the right number of gaps: " <> tshow gapsRight <> "/" <> tshow (length answered))
     when (not (null partial)) $
