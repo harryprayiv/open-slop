@@ -103,11 +103,32 @@ glob p s = go (T.unpack p) (T.unpack s)
     go _ _ = False
 
 -- | Why a file's content is a secret, when it is one.
+--
+-- Each kind is recognised by its marker followed by the shape of a real
+-- value, not by the marker alone: an encrypted sops value has base64 data
+-- and then ",iv:", a private key's header line is followed by a line of
+-- base64, and an age key's prefix by its bech32 body. The markers alone
+-- appear in code and notes that mention them, this module among them, and
+-- matching on the marker alone left those files out of the index.
 secretKind :: B.ByteString -> Maybe Text
 secretKind raw
-  | has "ENC[AES256_GCM," = Just "sops-encrypted"
-  | has "-----BEGIN" && has "PRIVATE KEY-----" = Just "a private key"
-  | has "AGE-SECRET-KEY-1" = Just "an age secret key"
+  | after "ENC[AES256_GCM,data:" sopsValue = Just "sops-encrypted"
+  | after "PRIVATE KEY-----" pemBody = Just "a private key"
+  | after "AGE-SECRET-KEY-1" ageBody = Just "an age secret key"
   | otherwise = Nothing
   where
-    has needle = not (B.null (snd (B.breakSubstring needle raw)))
+    after needle ok = any ok (rests needle raw)
+    rests needle s = case B.breakSubstring needle s of
+      (_, r)
+        | B.null r -> []
+        | otherwise -> let rest = B.drop (B.length needle) r in rest : rests needle rest
+    sopsValue r =
+      let (d, more) = B.span base64 r
+       in B.length d >= 4 && ",iv:" `B.isPrefixOf` more
+    pemBody r =
+      let (breaks, body) = B.span (\w -> w == 10 || w == 13) r
+       in not (B.null breaks) && B.length (B.takeWhile base64 body) >= 40
+    ageBody r = B.length (B.takeWhile bech32 r) >= 50
+    base64 w = alnum w || w == 43 || w == 47 || w == 61
+    bech32 w = (w >= 48 && w <= 57) || (w >= 65 && w <= 90)
+    alnum w = (w >= 48 && w <= 57) || (w >= 65 && w <= 90) || (w >= 97 && w <= 122)

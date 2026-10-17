@@ -36,6 +36,7 @@ module OpenSlop.Rag.Store
   , DocInfo (..)
   , listDocuments
   , forgetDocument
+  , chunksMatching
   , SessionInfo (..)
   , openSession
   , listSessions
@@ -207,6 +208,25 @@ removeMissing conn root seen = withTransaction conn do
     conn
     "DELETE FROM rag_documents d WHERE d.root = ? AND NOT EXISTS (SELECT 1 FROM rag_seen s WHERE s.path = d.path)"
     (Only root)
+
+-- | How many chunks have a path containing the first text and a heading
+-- or body containing the second, ignoring case. For checking that an
+-- evaluation's expected answer is in the index at all, so that a case
+-- whose phrase falls across two chunks, or names a file that was not
+-- ingested, is reported as a wrong case and not as a missed retrieval.
+chunksMatching :: Connection -> Text -> Text -> IO Int
+chunksMatching conn pathPart phrase = do
+  rows <-
+    query
+      conn
+      "SELECT count(*) FROM rag_chunks c JOIN rag_documents d ON d.id = c.document_id \
+      \WHERE strpos(lower(d.path), lower(?)) > 0 \
+      \AND strpos(lower(c.heading || E'\\n' || c.body), lower(?)) > 0"
+      (pathPart, phrase) ::
+      IO [Only Int64]
+  pure case rows of
+    [Only n] -> fromIntegral n
+    _ -> 0
 
 -- | The partial HNSW index for one model. DDL takes no parameters, so the
 -- model name goes in as a quoted literal and the index name is a digest of

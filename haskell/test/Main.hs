@@ -4,6 +4,7 @@ import Data.Aeson (Value (..), eitherDecode, object, (.=))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
+import Data.ByteString qualified as B
 import Data.ByteString.Lazy.Char8 qualified as BLC
 import Data.Char (isSpace)
 import Data.Either (isLeft, isRight)
@@ -390,11 +391,17 @@ ignorePatterns = do
 
 secrets :: Assertion
 secrets = do
-  secretKind "data: ENC[AES256_GCM,data:abc,iv:x,tag:y,type:str]\nsops:\n" @?= Just "sops-encrypted"
-  secretKind "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n" @?= Just "a private key"
-  secretKind "AGE-SECRET-KEY-1QQQQ" @?= Just "an age secret key"
+  -- The values are built at run time so that this file holds no string
+  -- the indexer's check would take for a secret.
+  secretKind ("data: ENC[AES256_GCM," <> "data:abcd,iv:x,tag:y,type:str]\nsops:\n") @?= Just "sops-encrypted"
+  secretKind ("-----BEGIN OPENSSH PRIVATE " <> "KEY-----\n" <> B.replicate 64 65 <> "\n") @?= Just "a private key"
+  secretKind ("AGE-SECRET-" <> "KEY-1" <> B.replicate 58 81) @?= Just "an age secret key"
   secretKind "-----BEGIN PUBLIC KEY-----\nabc\n" @?= Nothing
   secretKind "port = 8080;" @?= Nothing
+  -- Code and notes that only name a marker are not secrets.
+  secretKind "  | has \"AGE-SECRET-KEY-1\" = Just \"an age secret key\"" @?= Nothing
+  secretKind "  | has \"-----BEGIN\" && has \"PRIVATE KEY-----\" = Just" @?= Nothing
+  secretKind "values look like ENC[AES256_GCM,data:...]" @?= Nothing
 
 hosts :: Assertion
 hosts = do

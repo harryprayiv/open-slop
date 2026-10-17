@@ -1,0 +1,42 @@
+{
+  "cases": [
+    {
+      "question": "What HTTP status does the backend give when a sale asks for more inventory than is available?",
+      "expect": [{"path": "backend/src/Service/Transaction.hs", "contains": "refuseWrite (InsufficientInventory"}]
+    },
+    {
+      "question": "What happens to a sale's stock pulls when the sale is voided?",
+      "expect": [{"path": "backend/src/Service/Transaction.hs", "contains": "StockDb.cancelPullsForTransaction txId reason"}]
+    },
+    {
+      "question": "Can one sale be refunded twice?",
+      "expect": [{"path": "backend/src/Service/Transaction.hs", "contains": "so one sale cannot be refunded twice"}]
+    },
+    {
+      "question": "What error does the backend return when a request tries to modify a refund transaction?",
+      "expect": [{"path": "backend/src/Service/Transaction.hs", "contains": "Cannot modify a refund transaction"}]
+    },
+    {
+      "question": "What reason is recorded on stock pulls cancelled because an item was taken off a sale?",
+      "expect": [{"path": "backend/src/Service/Transaction.hs", "contains": "cancelPullsForItem txId itemSku"}]
+    },
+    {
+      "question": "Where is InventoryException mapped to an HTTP status code?",
+      "expect": [{"path": "backend/src/Service/Transaction.hs", "contains": "only place that maps 'InventoryException'"}]
+    },
+    {
+      "question": "What capabilities does a signed-out browser have in the frontend?",
+      "expect": [{"path": "frontend/src/", "contains": "SignedOut -> emptyCapabilities"}]
+    },
+    {
+      "question": "What does addItem do with a quantity of zero, and which card processor does cheeblr use for payments?",
+      "expect": [{"path": "backend/src/Service/Transaction.hs", "contains": "Quantity must be greater than zero"}],
+      "missing": 1
+    },
+    {
+      "question": "Which state does a sale move to when its first item is added, and what is the store's opening time?",
+      "expect": [{"path": "backend/src/Service/Transaction.hs", "contains": "move from Created to InProgress"}],
+      "missing": 1
+    }
+  ]
+}

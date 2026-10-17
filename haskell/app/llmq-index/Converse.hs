@@ -15,6 +15,9 @@
 -- hardware. The current figures are printed at the start.
 module Converse
   ( Asking (..)
+  , Selection (..)
+  , select
+  , answerWith
   , askOnce
   , converse
   ) where
@@ -22,6 +25,8 @@ module Converse
 import Control.Exception (AsyncException (..), throwIO, try)
 import Control.Monad (forM_, unless, when)
 import Data.Aeson (object, toJSON, (.=))
+import Data.List (sortOn)
+import Data.Ord (Down (..))
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -60,10 +65,23 @@ data Asking = Asking
 say :: Text -> IO ()
 say = TIO.hPutStrLn stderr . ("llmq-index: " <>)
 
--- | One turn: rewrite against the history, retrieve, pack, stream, judge.
--- Returns the answer, or why there is none.
-turn :: Asking -> [(Text, Text)] -> Text -> IO (Either Text Answer)
-turn a history question = do
+-- | The sources chosen for one question, and how they were chosen.
+data Selection = Selection
+  { query :: Text
+  -- ^ the question as searched, after rewriting against the history
+  , ranked :: [(Hit, Double)]
+  -- ^ the candidates the cut was made from, best first, with the score it
+  -- was made on: the reranker's when there is one, else similarity
+  , kept :: [Hit]
+  -- ^ those within the margin, at most --sources
+  , packed :: [Hit]
+  -- ^ those of 'kept' that fit the model's capacity; what the model is given
+  }
+
+-- | Rewrite against the history, retrieve, choose and pack. Returns the
+-- sources the model would be given, or why there are none.
+select :: Asking -> [(Text, Text)] -> Text -> IO (Either Text Selection)
+select a history question = do
   cap <- readIORef a.capacity
   standalone <- condense a.client a.chatTo cap history question
   case standalone of
@@ -75,29 +93,45 @@ turn a history question = do
       case found of
         Left e -> pure (Left e)
         Right [] -> pure (Left (if null sc then "nothing in the index matches that question" else "nothing under " <> T.intercalate ", " sc <> " matches that question"))
-        Right hits -> chosen a q hits >>= \case
-          Left e -> pure (Left e)
-          Right kept -> do
-            let packed = packSources cap a.maxWait (historyChars cap a.maxWait history question) kept
-            say (T.pack (show (length packed)) <> " of " <> T.pack (show (length kept)) <> " fit; answering")
-            answer cap packed
-  where
-    answer cap packed = do
-      r <- try (answerStream a.client a.chatTo cap a.maxWait history question packed (\t -> TIO.hPutStr stderr t >> hFlush stderr))
-      TIO.hPutStrLn stderr ""
-      case r of
-        Left UserInterrupt -> pure (Left "stopped")
-        Left e -> throwIO e
-        Right (Left e) -> pure (Left e)
-        Right (Right ans) -> do
-          forM_ ans.promptTokens \n -> modifyIORef' a.capacity (\c -> learn c ans.promptChars n)
-          TIO.putStrLn ans.text
-          showSources ans
-          pure (Right ans)
+        Right hits ->
+          chosen a q hits >>= \case
+            Left e -> pure (Left e)
+            Right (ranked, kept) -> do
+              let packed = packSources cap a.maxWait (historyChars cap a.maxWait history question) kept
+              say (T.pack (show (length packed)) <> " of " <> T.pack (show (length kept)) <> " fit")
+              pure (Right Selection {query = q, ranked, kept, packed})
 
--- | The sources for one answer, best first: reranked when there is a
--- reranker, cut by similarity when there is not, and at most --sources.
-chosen :: Asking -> Text -> [Hit] -> IO (Either Text [Hit])
+-- | Ask the model, constrained to the answer schema, with the sources
+-- given, and learn from the token count the server reports. The raw reply
+-- goes to the callback as it streams.
+answerWith :: Asking -> [(Text, Text)] -> Text -> [Hit] -> (Text -> IO ()) -> IO (Either Text Answer)
+answerWith a history question packed onText = do
+  cap <- readIORef a.capacity
+  r <- try (answerStream a.client a.chatTo cap a.maxWait history question packed onText)
+  case r of
+    Left UserInterrupt -> pure (Left "stopped")
+    Left e -> throwIO e
+    Right (Left e) -> pure (Left e)
+    Right (Right ans) -> do
+      forM_ ans.promptTokens \n -> modifyIORef' a.capacity (\c -> learn c ans.promptChars n)
+      pure (Right ans)
+
+-- | One turn on the terminal: select, then answer with the raw JSON
+-- streaming to stderr, then the rendered answer and its sources.
+turn :: Asking -> [(Text, Text)] -> Text -> IO (Either Text Answer)
+turn a history question =
+  select a history question >>= \case
+    Left e -> pure (Left e)
+    Right sel -> do
+      r <- answerWith a history question sel.packed (\t -> TIO.hPutStr stderr t >> hFlush stderr)
+      TIO.hPutStrLn stderr ""
+      forM_ r \ans -> TIO.putStrLn ans.text >> showSources ans
+      pure r
+
+-- | The candidates scored best first, and those kept: reranked when there
+-- is a reranker, cut by similarity when there is not, and at most
+-- --sources.
+chosen :: Asking -> Text -> [Hit] -> IO (Either Text ([(Hit, Double)], [Hit]))
 chosen a q hits = case a.rerankWith of
   Nothing -> do
     let good = relevant hits
@@ -112,7 +146,7 @@ chosen a q hits = case a.rerankWith of
           <> T.pack (show a.sources)
           <> ")"
       )
-    pure (Right kept)
+    pure (Right (sortOn (Down . snd) [(h, h.similarity) | h <- hits], kept))
   Just rr -> do
     let candidates = take a.rerankDepth hits
     t0 <- getCurrentTime
@@ -141,7 +175,7 @@ chosen a q hits = case a.rerankWith of
               <> "), scores "
               <> T.intercalate " " [T.pack (showFFloat (Just 2) s "") | (_, s) <- kept]
           )
-        pure (Right (map fst kept))
+        pure (Right (scored, map fst kept))
 
 showSources :: Answer -> IO ()
 showSources ans = do

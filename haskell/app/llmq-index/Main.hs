@@ -10,6 +10,8 @@
 --   llmq-index search QUESTION            the hits, with scores and sources
 --   llmq-index ask QUESTION               one cited answer, streamed
 --   llmq-index chat [--session NAME]      a conversation, stored by name
+--   llmq-index eval FILE                  measure retrieval and answers
+--                                         against known answers; see Eval
 --   llmq-index sessions                   the stored conversations
 --   llmq-index docs [--under PATH]        the indexed documents
 --   llmq-index forget FILE...             remove documents from the index
@@ -43,6 +45,7 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (defaultTimeLocale, formatTime)
 import Converse (Asking (..), askOnce, converse)
+import Eval (EvalOpts (..), runEval)
 import Ingest (IngestOpts (..), ingestRoot)
 import Numeric (showFFloat)
 import OpenSlop.Capacity (Capacity, capacityFor, measuredEntry, probeWindow)
@@ -88,6 +91,7 @@ data Command
   | Search Text Int Int Int Double [FilePath]
   | Ask Text Talk
   | ChatCmd (Maybe Text) Talk
+  | EvalCmd EvalOpts Talk
   | Sessions
   | Docs [FilePath]
   | Forget [FilePath]
@@ -135,6 +139,7 @@ commandP =
         <> command "search" (info searchP (progDesc "Show what a question retrieves"))
         <> command "ask" (info (Ask <$> (T.pack <$> strArgument (metavar "QUESTION")) <*> talkP) (progDesc "Answer one question from the index, with sources"))
         <> command "chat" (info (ChatCmd <$> optional (T.pack <$> strOption (long "session" <> metavar "NAME" <> help "continue or start this conversation")) <*> talkP) (progDesc "A conversation about your files, stored by name"))
+        <> command "eval" (info (EvalCmd <$> evalP <*> talkP) (progDesc "Measure retrieval and answers against questions with known answers"))
         <> command "sessions" (info (pure Sessions) (progDesc "List stored conversations"))
         <> command "docs" (info (Docs <$> underP) (progDesc "List the indexed documents"))
         <> command "forget" (info (Forget <$> some (strArgument (metavar "FILE..."))) (progDesc "Remove documents from the index"))
@@ -158,6 +163,10 @@ commandP =
         <*> rerankDepthP
         <*> rerankMarginP
         <*> underP
+    evalP =
+      EvalOpts
+        <$> strArgument (metavar "FILE" <> help "the evaluation, as JSON; see the Eval module")
+        <*> switch (long "retrieval-only" <> help "stop before the chat model: rank, margin and packing only")
     pruneP =
       (PruneModel . T.pack <$> strOption (long "model" <> metavar "NAME"))
         <|> (PruneRoot <$> strOption (long "root" <> metavar "DIR"))
@@ -262,6 +271,10 @@ main = do
     Ask q t -> do
       a <- asking g conn t
       ok <- askOnce a q
+      unless ok exitFailure
+    EvalCmd o t -> do
+      a <- asking g conn t
+      ok <- runEval a o
       unless ok exitFailure
     ChatCmd session t -> do
       a <- asking g conn t
