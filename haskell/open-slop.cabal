@@ -70,6 +70,7 @@ library
     OpenSlop.OpenAI
     OpenSlop.Rag.Embed
     OpenSlop.Rag.Locality
+    OpenSlop.Rag.Rerank
     OpenSlop.Rag.Retrieve
     OpenSlop.Rag.Split
     OpenSlop.Rag.Store

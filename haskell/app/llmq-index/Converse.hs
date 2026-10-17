@@ -25,9 +25,12 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (defaultTimeLocale, formatTime, getZonedTime)
+import Data.Time.Clock (diffUTCTime, getCurrentTime)
+import Numeric (showFFloat)
 import OpenSlop.Capacity (Capacity (..), describeCapacity, learn)
 import OpenSlop.Http (Client)
 import OpenSlop.Rag.Embed (Embedder)
+import OpenSlop.Rag.Rerank (Reranker, rerank)
 import OpenSlop.Rag.Retrieve
 import OpenSlop.Rag.Store (Connection, Hit (..), addTurn, openSession, sessionTurns)
 import System.Directory (makeAbsolute)
@@ -41,7 +44,11 @@ data Asking = Asking
   , capacity :: IORef Capacity
   , depth :: Int
   , sources :: Int
-  -- ^ the most sources one answer is given, after 'relevant'
+  -- ^ the most sources one answer is given
+  , rerankWith :: Maybe Reranker
+  -- ^ when set, the best 'rerankDepth' candidates are reordered by it and
+  -- 'relevant' is not used
+  , rerankDepth :: Int
   , maxWait :: Maybe Double
   , scope :: IORef [Text]
   }
@@ -64,32 +71,67 @@ turn a history question = do
       case found of
         Left e -> pure (Left e)
         Right [] -> pure (Left (if null sc then "nothing in the index matches that question" else "nothing under " <> T.intercalate ", " sc <> " matches that question"))
-        Right hits -> do
-          let good = relevant hits
-              kept = take a.sources good
-              packed = packSources cap a.maxWait (historyChars cap a.maxWait history question) kept
-          say
-            ( T.pack (show (length good))
-                <> " relevant of "
-                <> T.pack (show (length hits))
-                <> " found, "
-                <> T.pack (show (length kept))
-                <> " kept (--sources "
-                <> T.pack (show a.sources)
-                <> "), "
-                <> T.pack (show (length packed))
-                <> " fit; answering"
-            )
-          r <- try (answerStream a.client a.chatTo cap a.maxWait history question packed (\t -> TIO.putStr t >> hFlush stdout))
-          TIO.putStrLn ""
-          case r of
-            Left UserInterrupt -> pure (Left "stopped")
-            Left e -> throwIO e
-            Right (Left e) -> pure (Left e)
-            Right (Right ans) -> do
-              forM_ ans.promptTokens \n -> modifyIORef' a.capacity (\c -> learn c ans.promptChars n)
-              showSources ans
-              pure (Right ans)
+        Right hits -> chosen a q hits >>= \case
+          Left e -> pure (Left e)
+          Right kept -> do
+            let packed = packSources cap a.maxWait (historyChars cap a.maxWait history question) kept
+            say (T.pack (show (length packed)) <> " of " <> T.pack (show (length kept)) <> " fit; answering")
+            answer cap packed
+  where
+    answer cap packed = do
+      r <- try (answerStream a.client a.chatTo cap a.maxWait history question packed (\t -> TIO.putStr t >> hFlush stdout))
+      TIO.putStrLn ""
+      case r of
+        Left UserInterrupt -> pure (Left "stopped")
+        Left e -> throwIO e
+        Right (Left e) -> pure (Left e)
+        Right (Right ans) -> do
+          forM_ ans.promptTokens \n -> modifyIORef' a.capacity (\c -> learn c ans.promptChars n)
+          showSources ans
+          pure (Right ans)
+
+-- | The sources for one answer, best first: reranked when there is a
+-- reranker, cut by similarity when there is not, and at most --sources.
+chosen :: Asking -> Text -> [Hit] -> IO (Either Text [Hit])
+chosen a q hits = case a.rerankWith of
+  Nothing -> do
+    let good = relevant hits
+        kept = take a.sources good
+    say
+      ( T.pack (show (length good))
+          <> " relevant of "
+          <> T.pack (show (length hits))
+          <> " found by similarity, "
+          <> T.pack (show (length kept))
+          <> " kept (--sources "
+          <> T.pack (show a.sources)
+          <> ")"
+      )
+    pure (Right kept)
+  Just rr -> do
+    let candidates = take a.rerankDepth hits
+    t0 <- getCurrentTime
+    r <- rerank a.client rr q candidates
+    t1 <- getCurrentTime
+    case r of
+      Left e -> pure (Left e)
+      Right scored -> do
+        let kept = take a.sources scored
+        say
+          ( "reranked the best "
+              <> T.pack (show (length candidates))
+              <> " of "
+              <> T.pack (show (length hits))
+              <> " found in "
+              <> T.pack (showFFloat (Just 1) (realToFrac (diffUTCTime t1 t0) :: Double) "")
+              <> " s, kept "
+              <> T.pack (show (length kept))
+              <> " (--sources "
+              <> T.pack (show a.sources)
+              <> "), scores "
+              <> T.intercalate " " [T.pack (showFFloat (Just 2) s "") | (_, s) <- kept]
+          )
+        pure (Right (map fst kept))
 
 showSources :: Answer -> IO ()
 showSources ans = do

@@ -5,9 +5,10 @@
 # and at what address; open-slop turns that plus the catalogue into the JSON
 # llmq reads, and wraps the binary so $OPEN_SLOP_CATALOGUE points at it and
 # $OPEN_SLOP_PROMPTS at the shipped prompts/ directory. llmq-index also gets
-# pandoc and pdftotext by store path and its rag defaults; llmq-agent gets
-# git, its model defaults and, when given, tricorder by store path. Nothing
-# in open-slop knows an address; every one comes from `endpoints` here.
+# pandoc and pdftotext by store path and its rag defaults, the reranker
+# among them; llmq-agent gets git, its model defaults and, when given,
+# tricorder by store path. Nothing in open-slop knows an address; every one
+# comes from `endpoints` here.
 #
 # ============================================================================
 # THE CATALOGUE JSON IS BUILT AT EVALUATION, THE MODEL LIST AT RUNTIME
@@ -57,6 +58,8 @@ let
         OPEN_SLOP_RAG_EMBED_MODEL = cfg.rag.embedModel;
         OPEN_SLOP_RAG_CHAT_AT = cfg.rag.chatAt;
         OPEN_SLOP_RAG_CHAT_MODEL = cfg.rag.chatModel;
+        OPEN_SLOP_RAG_RERANK_AT = cfg.rag.rerankAt;
+        OPEN_SLOP_RAG_RERANK_MODEL = cfg.rag.rerankModel;
         OPEN_SLOP_AGENT_CHAT_AT = cfg.agent.chatAt;
         OPEN_SLOP_AGENT_MODEL = cfg.agent.model;
         TRICORDER = if cfg.agent.tricorder == null then null else lib.getExe' cfg.agent.tricorder "tricorder";
@@ -156,6 +159,18 @@ in
         default = null;
         example = "qwen2.5:7b";
         description = "Chat model for llmq-index ask.";
+      };
+      rerankAt = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "oracle/rerank";
+        description = "The reranking llama-server (services.open-slop.reranker on that row). Unset means sources are chosen by similarity alone.";
+      };
+      rerankModel = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "bge-reranker-v2-m3";
+        description = "The reranker's alias, as services.open-slop.reranker.alias sets it.";
       };
     };
 

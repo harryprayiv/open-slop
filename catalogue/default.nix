@@ -25,6 +25,8 @@
 #                                    --ctx-size, which is why the context for
 #                                    that server is changed here rather than
 #                                    on a host
+#   nix/modules/reranker.nix         the rerank backend's port, and its ctx,
+#                                    which is also its batch size
 #   nix/modules/gateway.nix          the loopback catalogue it serves
 #   nix/modules/catalogue-check.nix  warns when a row declares a model the
 #                                    merged catalogue does not describe
@@ -208,6 +210,36 @@
         the same day: --spec-draft-model loads the draft, and the server
         then reports no draft statistics and no speedup, with or without a
         grammar. Worth retrying against upstream llama.cpp.
+      '';
+    };
+
+    rerank = {
+      engine = "llama-server";
+
+      # A second llama-server, started with --reranking by
+      # nix/modules/reranker.nix. It answers /v1/rerank and nothing a chat
+      # client can use; llmq-index is its only client.
+      port = 8082;
+
+      # Not a chat server; these describe nothing it does except ctx.
+      streams = false;
+      acceptsOptions = false;
+
+      # The context, and also the physical batch: a non-causal model scores
+      # the question and one document in a single batch, so this is the
+      # longest pair it accepts. llmq-index sends documents of at most
+      # 2,400 characters, under 1,000 tokens.
+      ctx = 4096;
+      predict = 0;
+      promptOverhead = 0;
+      charsPerToken = 2.8;
+      temperature = null;
+
+      blurb = ''
+        llama-server with --reranking: a cross-encoder that scores how well
+        each retrieved chunk answers the question, for llmq-index. Upstream
+        llama.cpp from nixpkgs. Not a chat model; llmq lists it but cannot
+        talk to it.
       '';
     };
   };

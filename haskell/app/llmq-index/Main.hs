@@ -20,9 +20,12 @@
 -- How much one question may carry (conversation, sources, answer) comes
 -- from "OpenSlop.Capacity": the window the chat server reports within the
 -- catalogue's limit, and the characters per token llmq-bench measured.
--- Sources are first cut to the relevant ones (see
--- "OpenSlop.Rag.Retrieve".relevant) and to at most --sources of them, then
--- packed into that capacity. No answer length is fixed here. --max-wait
+-- Sources are chosen in one of two ways. With a reranker configured
+-- (--rerank-at, default $OPEN_SLOP_RAG_RERANK_AT), the best --rerank-depth
+-- candidates of the hybrid search are reordered by it; see
+-- "OpenSlop.Rag.Rerank". Without one, candidates are cut by similarity;
+-- see "OpenSlop.Rag.Retrieve".relevant. Either way at most --sources are
+-- kept, then packed into that capacity. No answer length is fixed here. --max-wait
 -- limits the prompt further, by the measured prefill rate, when an answer
 -- is wanted within a given time on slow hardware.
 module Main (main) where
@@ -44,6 +47,7 @@ import OpenSlop.Http (Client, newClient)
 import OpenSlop.Measured (loadCatalogue, measuredPath, readMeasured)
 import OpenSlop.Rag.Embed (Embedder (..), embedder)
 import OpenSlop.Rag.Locality (Lan, onLan)
+import OpenSlop.Rag.Rerank (Reranker, rerank, reranker)
 import OpenSlop.Rag.Retrieve (Chat (..), Retrieval (..), relevanceMargin, retrieve)
 import OpenSlop.Rag.Split (SplitConfig (..), defaultSplit)
 import OpenSlop.Rag.Store
@@ -58,6 +62,9 @@ data Global = Global
   , catalogueFile :: Maybe FilePath
   , embedAt :: Maybe String
   , embedModel :: Maybe String
+  , rerankAt :: Maybe String
+  , rerankModel :: Maybe String
+  , noRerank :: Bool
   }
 
 data Talk = Talk
@@ -66,13 +73,14 @@ data Talk = Talk
   , maxWait :: Maybe Double
   , depth :: Int
   , sources :: Int
+  , rerankDepth :: Int
   , under :: [FilePath]
   }
 
 data Command
   = Init
   | Ingest IngestOpts
-  | Search Text Int Int [FilePath]
+  | Search Text Int Int Int [FilePath]
   | Ask Text Talk
   | ChatCmd (Maybe Text) Talk
   | Sessions
@@ -89,6 +97,9 @@ globalP =
     <*> optional (strOption (long "catalogue" <> metavar "FILE" <> help "catalogue JSON (default $OPEN_SLOP_CATALOGUE)"))
     <*> optional (strOption (long "embed-at" <> metavar "ROW/BACKEND" <> help "embedding server (default $OPEN_SLOP_RAG_EMBED_AT)"))
     <*> optional (strOption (long "embed-model" <> metavar "NAME" <> help "embedding model (default $OPEN_SLOP_RAG_EMBED_MODEL)"))
+    <*> optional (strOption (long "rerank-at" <> metavar "ROW/BACKEND" <> help "reranking llama-server (default $OPEN_SLOP_RAG_RERANK_AT; unset means no reranking)"))
+    <*> optional (strOption (long "rerank-model" <> metavar "NAME" <> help "reranker's model name (default $OPEN_SLOP_RAG_RERANK_MODEL)"))
+    <*> switch (long "no-rerank" <> help "choose sources by similarity even when a reranker is configured")
 
 underP :: Parser [FilePath]
 underP = many (strOption (long "under" <> metavar "PATH" <> help "only documents under this path; repeat for several"))
@@ -101,7 +112,11 @@ talkP =
     <*> optional (option auto (long "max-wait" <> metavar "SECS" <> help "keep the prompt small enough to be read within this time, at the measured prefill rate"))
     <*> option auto (long "depth" <> value 40 <> showDefault <> help "candidates from each half of the search")
     <*> option auto (long "sources" <> value 6 <> showDefault <> help "the most sources one answer is given; a small model answers worse the more it is given")
+    <*> rerankDepthP
     <*> underP
+
+rerankDepthP :: Parser Int
+rerankDepthP = option auto (long "rerank-depth" <> value 20 <> showDefault <> help "candidates sent to the reranker; its time grows with this")
 
 commandP :: Parser Command
 commandP =
@@ -130,6 +145,7 @@ commandP =
         <$> (T.pack <$> strArgument (metavar "QUESTION"))
         <*> option auto (long "depth" <> value 40 <> showDefault <> help "candidates from each half of the search")
         <*> option auto (long "limit" <> value 8 <> showDefault <> help "hits shown")
+        <*> rerankDepthP
         <*> underP
     pruneP =
       (PruneModel . T.pack <$> strOption (long "model" <> metavar "NAME"))
@@ -178,13 +194,26 @@ main = do
       client <- newClient
       e <- embedderFor g
       forM_ o.roots (ingestRoot client conn e o)
-    Search q d l scope -> do
+    Search q d l rd scope -> do
       client <- newClient
       e <- embedderFor g
+      rr <- rerankerFor g
       sc <- absolutes scope
-      retrieve client conn e Retrieval {depth = d, limit = l, scope = sc} q >>= \case
+      retrieve client conn e Retrieval {depth = d, limit = max l rd, scope = sc} q >>= \case
         Left err -> die' err
-        Right hits -> do
+        Right found -> do
+          hits <- case rr of
+            Nothing -> pure (take l found)
+            Just rk ->
+              rerank client rk q (take rd found) >>= \case
+                Left err -> die' err
+                Right scored -> do
+                  say ("reranked the best " <> T.pack (show (min rd (length found))) <> " of " <> T.pack (show (length found)) <> " found; shown in the reranker's order")
+                  forM_ (zip [1 :: Int ..] (take l scored)) \(n, (h, s)) ->
+                    TIO.putStrLn ("[" <> T.pack (show n) <> "] rerank " <> T.pack (showFFloat (Just 3) s "") <> "  " <> h.path <> ":" <> T.pack (show h.lineFrom) <> "-" <> T.pack (show h.lineTo))
+                  TIO.putStrLn ""
+                  say "the hybrid search's own order, for comparison:"
+                  pure (take l found)
           let best = if null hits then 0 else maximum (map (.similarity) hits)
           when (null hits) (say "no matches")
           forM_ (zip [1 :: Int ..] hits) \(n, h) -> do
@@ -270,10 +299,37 @@ capacityOf client cat ep b model = do
         _ -> Nothing
   pure (capacityFor b (lookupModel cat ep.backend model) entry served)
 
+-- | The reranker, when one is configured and --no-rerank was not given.
+-- Configuring the server without the model, or the model without the
+-- server, is an error rather than a silent fallback.
+rerankerFor :: Global -> IO (Maybe Reranker)
+rerankerFor g
+  | g.noRerank = pure Nothing
+  | otherwise = do
+      at <- optionalSetting g.rerankAt "OPEN_SLOP_RAG_RERANK_AT"
+      model <- optionalSetting g.rerankModel "OPEN_SLOP_RAG_RERANK_MODEL"
+      case (at, model) of
+        (Nothing, Nothing) -> pure Nothing
+        (Just w, Just m) -> do
+          cat <- catalogue g
+          (lan, _, b) <- lanServer cat w
+          Just <$> either die' pure (reranker lan b.engine (T.pack m))
+        (Just _, Nothing) -> die' "a reranker server is set but no model: pass --rerank-model or set OPEN_SLOP_RAG_RERANK_MODEL"
+        (Nothing, Just _) -> die' "a reranker model is set but no server: pass --rerank-at or set OPEN_SLOP_RAG_RERANK_AT"
+
+optionalSetting :: Maybe String -> String -> IO (Maybe String)
+optionalSetting given var = case given of
+  Just v -> pure (Just v)
+  Nothing ->
+    lookupEnv var >>= \case
+      Just v | not (null v) -> pure (Just v)
+      _ -> pure Nothing
+
 asking :: Global -> Connection -> Talk -> IO Asking
 asking g conn t = do
   client <- newClient
   e <- embedderFor g
+  rr <- rerankerFor g
   cat <- catalogue g
   at <- setting t.chatAt "OPEN_SLOP_RAG_CHAT_AT" Nothing
   model <- T.pack <$> setting t.chatModel "OPEN_SLOP_RAG_CHAT_MODEL" Nothing
@@ -290,6 +346,8 @@ asking g conn t = do
       , capacity = capRef
       , depth = t.depth
       , sources = t.sources
+      , rerankWith = rr
+      , rerankDepth = t.rerankDepth
       , maxWait = t.maxWait
       , scope = sc
       }
