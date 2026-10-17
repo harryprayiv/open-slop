@@ -3,17 +3,41 @@
     {
       "question": "Which machine holds the binary cache, and on what port?",
       "expect": [
-        {"path": "modules/system/cache.nix", "contains": "FOUNDATION"},
-        {"path": "modules/system/cache.nix", "contains": "default = 8080"}
+        {
+          "path": "modules/system/cache.nix",
+          "contains": "FOUNDATION"
+        },
+        {
+          "path": "modules/system/cache.nix",
+          "contains": "default = 8080"
+        }
       ]
     },
     {
       "question": "What is the forge's ssh user, and which machine runs the forge?",
-      "expect": [{"path": "modules/home/base.nix", "contains": "forgejo"}]
+      "expect": [
+        {
+          "any": [
+            {
+              "path": "modules/home/base.nix",
+              "contains": "forgejo"
+            },
+            {
+              "path": "flake.nix",
+              "contains": "The forge's ssh user is `forgejo`"
+            }
+          ]
+        }
+      ]
     },
     {
       "question": "What port does attic use, and what colour is the sky on oracle?",
-      "expect": [{"path": "modules/system/cache.nix", "contains": "default = 8080"}],
+      "expect": [
+        {
+          "path": "modules/system/cache.nix",
+          "contains": "default = 8080"
+        }
+      ],
       "missing": 1
     }
   ]

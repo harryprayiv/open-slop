@@ -27,6 +27,12 @@
 -- header, which answers the question as well, and the case counting it as
 -- a miss.
 --
+-- When the answer is stated in more than one file, an entry can instead be
+-- {"any": [{"path": ..., "contains": ...}, ...]}, and a hit matching any
+-- of the alternatives counts: the forge's ssh user is stated both in
+-- modules/home/base.nix and beside the installer's remotes in flake.nix,
+-- and the reranker chose flake.nix.
+--
 -- A phrase and a path are used rather than line numbers because line
 -- numbers move with every edit and the file would go stale; each phrase
 -- should be short and specific, so that it falls inside one chunk.
@@ -85,20 +91,23 @@ data EvalOpts = EvalOpts
   , retrievalOnly :: Bool
   }
 
-data Expect = Expect
-  { path :: Text
-  , contains :: [Text]
-  -- ^ any one of these
-  }
+-- | One expected chunk: alternatives, each a path fragment and phrases,
+-- any of which matches.
+newtype Expect = Expect [(Text, [Text])]
 
 instance FromJSON Expect where
-  parseJSON = withObject "expected chunk" \o -> do
-    p <- o .: "path"
-    c <- o .: "contains"
-    phrases <- case c of
-      Aeson.String t -> pure [t]
-      _ -> parseJSON c
-    pure (Expect p phrases)
+  parseJSON = withObject "expected chunk" \o ->
+    o .:? "any" >>= \case
+      Just (alts :: [Aeson.Value]) -> Expect . concat <$> traverse (withObject "alternative" entry) alts
+      Nothing -> Expect <$> entry o
+    where
+      entry o = do
+        p <- o .: "path"
+        c <- o .: "contains"
+        phrases <- case c of
+          Aeson.String t -> pure [t]
+          _ -> parseJSON c
+        pure [(p, phrases)]
 
 data Case = Case
   { question :: Text
@@ -146,9 +155,11 @@ data Outcome = Outcome
   }
 
 matches :: Expect -> Hit -> Bool
-matches e h =
-  T.toLower e.path `T.isInfixOf` T.toLower h.path
-    && any (\c -> T.toLower c `T.isInfixOf` T.toLower (h.heading <> "\n" <> h.body)) e.contains
+matches (Expect alts) h = any ok alts
+  where
+    ok (p, cs) =
+      T.toLower p `T.isInfixOf` T.toLower h.path
+        && any (\c -> T.toLower c `T.isInfixOf` T.toLower (h.heading <> "\n" <> h.body)) cs
 
 say :: Text -> IO ()
 say = TIO.hPutStrLn stderr . ("llmq-index: " <>)
@@ -211,7 +222,7 @@ one a o c =
       case answered of
         Left e -> pure (Left e)
         Right ans -> do
-          counts <- traverse (\e -> sum <$> traverse (chunksMatching a.conn e.path) e.contains) c.expect
+          counts <- traverse (\(Expect alts) -> sum <$> sequence [chunksMatching a.conn p ph | (p, cs) <- alts, ph <- cs]) c.expect
           let best = case sel.ranked of
                 [] -> 0
                 ((_, s) : _) -> s
@@ -241,11 +252,9 @@ one a o c =
           pure (Right (map fate (zip c.expect counts), field, outcome))
 
 describeFate :: Expect -> Fate -> Text
-describeFate e f =
-  e.path
-    <> " \""
-    <> T.intercalate "\" or \"" e.contains
-    <> "\": "
+describeFate (Expect alts) f =
+  T.intercalate " or " [p <> " \"" <> T.intercalate "\" or \"" cs <> "\"" | (p, cs) <- alts]
+    <> ": "
     <> case f.rank of
       Nothing
         | f.indexed == 0 -> "NOT IN THE INDEX: the file was not ingested, or the phrase is not inside one chunk; fix the case"
