@@ -2,50 +2,115 @@
   "cases": [
     {
       "question": "How far below the closest hit's similarity may a hit be and still be sent to the model when there is no reranker?",
-      "expect": [{"path": "src/OpenSlop/Rag/Retrieve.hs", "contains": "relevanceMargin = 0.08"}]
+      "expect": [
+        {
+          "path": "src/OpenSlop/Rag/Retrieve.hs",
+          "contains": "relevanceMargin = 0.08"
+        }
+      ]
     },
     {
       "question": "What is the most characters of one chunk sent to the reranker?",
-      "expect": [{"path": "src/OpenSlop/Rag/Rerank.hs", "contains": "documentChars = 2400"}]
+      "expect": [
+        {
+          "path": "src/OpenSlop/Rag/Rerank.hs",
+          "contains": "documentChars = 2400"
+        }
+      ]
     },
     {
       "question": "What is the name of the per-directory file that lists paths to leave out of the index?",
-      "expect": [{"path": "src/OpenSlop/Rag/Exclude.hs", "contains": "ignoreFile = \".llmqignore\""}]
+      "expect": [
+        {
+          "path": "src/OpenSlop/Rag/Exclude.hs",
+          "contains": [
+            "ignoreFile = \".llmqignore\"",
+            "root's .llmqignore file"
+          ]
+        }
+      ]
     },
     {
       "question": "Which kinds of secret does the indexer recognise by a file's content?",
-      "expect": [{"path": "src/OpenSlop/Rag/Exclude.hs", "contains": "Just \"an age secret key\""}]
+      "expect": [
+        {
+          "path": "src/OpenSlop/Rag/Exclude.hs",
+          "contains": "Just \"an age secret key\""
+        }
+      ]
     },
     {
       "question": "Which engine can serve as the reranker, and what happens if another engine is configured?",
-      "expect": [{"path": "src/OpenSlop/Rag/Rerank.hs", "contains": "has no rerank route"}]
+      "expect": [
+        {
+          "path": "src/OpenSlop/Rag/Rerank.hs",
+          "contains": [
+            "has no rerank route",
+            "any other engine is refused when the reranker"
+          ]
+        }
+      ]
     },
     {
       "question": "Why does answerStream refuse hailo-ollama?",
-      "expect": [{"path": "src/OpenSlop/Rag/Retrieve.hs", "contains": "hailo-ollama takes no schema, so it cannot"}]
+      "expect": [
+        {
+          "path": "src/OpenSlop/Rag/Retrieve.hs",
+          "contains": "hailo-ollama takes no schema, so it cannot"
+        }
+      ]
     },
     {
       "question": "What constant does the reciprocal rank fusion in the hybrid search use?",
-      "expect": [{"path": "src/OpenSlop/Rag/Store.hs", "contains": "sum(1.0 / (60 + r))"}]
+      "expect": [
+        {
+          "path": "src/OpenSlop/Rag/Store.hs",
+          "contains": [
+            "sum(1.0 / (60 + r))",
+            "reciprocal rank (k = 60)"
+          ]
+        }
+      ]
     },
     {
       "question": "Which kinds of file are split by their headings and which are split flat?",
-      "expect": [{"path": "app/llmq-index/Extract.hs", "contains": "structureOf = \\case"}]
+      "expect": [
+        {
+          "path": "app/llmq-index/Extract.hs",
+          "contains": "structureOf = \\case"
+        }
+      ]
     },
     {
       "question": "What does the reranker do when its reply leaves out one of the documents sent?",
-      "expect": [{"path": "src/OpenSlop/Rag/Rerank.hs", "contains": "does not score each document sent exactly once"}]
+      "expect": [
+        {
+          "path": "src/OpenSlop/Rag/Rerank.hs",
+          "contains": "does not score each document sent exactly once"
+        }
+      ]
     },
     {
       "question": "What is the default number of sources given to one answer, and what is the default rerank depth?",
       "expect": [
-        {"path": "app/llmq-index/Main.hs", "contains": "long \"sources\" <> value 6"},
-        {"path": "app/llmq-index/Main.hs", "contains": "long \"rerank-depth\" <> value 20"}
+        {
+          "path": "app/llmq-index/Main.hs",
+          "contains": "long \"sources\" <> value 6"
+        },
+        {
+          "path": "app/llmq-index/Main.hs",
+          "contains": "long \"rerank-depth\" <> value 20"
+        }
       ]
     },
     {
       "question": "What is the default rerank margin, and which GPU vendor does open-slop recommend for the reranker?",
-      "expect": [{"path": "app/llmq-index/Main.hs", "contains": "long \"rerank-margin\" <> value 2.0"}],
+      "expect": [
+        {
+          "path": "app/llmq-index/Main.hs",
+          "contains": "long \"rerank-margin\" <> value 2.0"
+        }
+      ],
       "missing": 1
     },
     {

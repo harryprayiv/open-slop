@@ -20,10 +20,16 @@
 --
 -- "expect" lists the chunks that answer the question, one for each part
 -- that can be answered. A hit matches when its path contains "path" and
--- its text contains "contains", ignoring case. A phrase and a path are
--- used rather than line numbers because line numbers move with every edit
--- and the file would go stale; the phrase should be short and specific, so
--- that it falls inside one chunk and in no other.
+-- its text contains "contains", ignoring case. "contains" may also be a
+-- list of phrases, any one of which matches, for an answer stated in more
+-- than one place (a module's header comment and the definition it
+-- describes): the first run of these sets showed the reranker choosing the
+-- header, which answers the question as well, and the case counting it as
+-- a miss.
+--
+-- A phrase and a path are used rather than line numbers because line
+-- numbers move with every edit and the file would go stale; each phrase
+-- should be short and specific, so that it falls inside one chunk.
 --
 -- "missing" is how many parts of the question the files do not answer
 -- (default 0). A case with expect [] and missing 1 asks something the
@@ -81,11 +87,18 @@ data EvalOpts = EvalOpts
 
 data Expect = Expect
   { path :: Text
-  , contains :: Text
+  , contains :: [Text]
+  -- ^ any one of these
   }
 
 instance FromJSON Expect where
-  parseJSON = withObject "expected chunk" \o -> Expect <$> o .: "path" <*> o .: "contains"
+  parseJSON = withObject "expected chunk" \o -> do
+    p <- o .: "path"
+    c <- o .: "contains"
+    phrases <- case c of
+      Aeson.String t -> pure [t]
+      _ -> parseJSON c
+    pure (Expect p phrases)
 
 data Case = Case
   { question :: Text
@@ -135,7 +148,7 @@ data Outcome = Outcome
 matches :: Expect -> Hit -> Bool
 matches e h =
   T.toLower e.path `T.isInfixOf` T.toLower h.path
-    && T.toLower e.contains `T.isInfixOf` T.toLower (h.heading <> "\n" <> h.body)
+    && any (\c -> T.toLower c `T.isInfixOf` T.toLower (h.heading <> "\n" <> h.body)) e.contains
 
 say :: Text -> IO ()
 say = TIO.hPutStrLn stderr . ("llmq-index: " <>)
@@ -198,7 +211,7 @@ one a o c =
       case answered of
         Left e -> pure (Left e)
         Right ans -> do
-          counts <- traverse (\e -> chunksMatching a.conn e.path e.contains) c.expect
+          counts <- traverse (\e -> sum <$> traverse (chunksMatching a.conn e.path) e.contains) c.expect
           let best = case sel.ranked of
                 [] -> 0
                 ((_, s) : _) -> s
@@ -231,7 +244,7 @@ describeFate :: Expect -> Fate -> Text
 describeFate e f =
   e.path
     <> " \""
-    <> e.contains
+    <> T.intercalate "\" or \"" e.contains
     <> "\": "
     <> case f.rank of
       Nothing
