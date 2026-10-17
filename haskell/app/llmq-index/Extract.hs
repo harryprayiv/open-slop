@@ -6,6 +6,12 @@
 -- PDFs go through pdftotext, and each page becomes a "Page n" heading, so a
 -- citation names the page.
 --
+-- A .chase bundle (from chase, the structural compressor for Haskell and
+-- PureScript) is split per module: each "=== BEGIN path ===" line becomes a
+-- heading naming the module's file, and each "=== END ... ===" line a blank
+-- line, one line for one, so a chunk's line range is still a line range in
+-- the bundle and its heading says which source file it summarises.
+--
 -- pandoc and pdftotext are found at $OPEN_SLOP_PANDOC and
 -- $OPEN_SLOP_PDFTOTEXT, which the Nix wrapper sets to store paths, or on
 -- PATH when those are unset.
@@ -39,6 +45,8 @@ data Kind
   | Converted Text
   -- ^ through pandoc, with pandoc's reader name
   | Pdf
+  | Chase
+  -- ^ a chase bundle: signatures, types and annotations, no bodies
   deriving stock (Eq, Show)
 
 kindName :: Kind -> Text
@@ -48,6 +56,7 @@ kindName = \case
   Code -> "code"
   Converted r -> "pandoc:" <> r
   Pdf -> "pdf"
+  Chase -> "chase"
 
 -- | How a kind's text is split. Markdown and everything converted to it
 -- has headings; in code and plain text a "# " line is a comment.
@@ -56,6 +65,7 @@ structureOf = \case
   Markdown -> Headed
   Converted _ -> Headed
   Pdf -> Headed
+  Chase -> Headed
   PlainText -> Flat
   Code -> Flat
 
@@ -73,6 +83,7 @@ classify path = case map toLower (takeExtension path) of
   ".rtf" -> Just (Converted "rtf")
   ".tex" -> Just (Converted "latex")
   ".pdf" -> Just Pdf
+  ".chase" -> Just Chase
   e | e `elem` codeExtensions -> Just Code
   "" | takeFileName path `elem` ["README", "LICENSE", "Makefile", "Justfile"] -> Just PlainText
   _ -> Nothing
@@ -108,6 +119,7 @@ extract kind path raw = case kind of
     run exe ["--from", T.unpack reader, "--to", "gfm", "--wrap=none", path]
   _
     | B.elem 0 (B.take 8192 raw) -> pure (Left "binary content")
+    | kind == Chase -> pure (Right (chaseModules (lenient raw)))
     | otherwise -> pure (Right (lenient raw))
   where
     run exe args = do
@@ -117,6 +129,14 @@ extract kind path raw = case kind of
         Right (ExitSuccess, out, _) -> Right (lenient (BL.toStrict out))
         Right (ExitFailure n, _, err) ->
           Left (T.pack exe <> " exited " <> T.pack (show n) <> ": " <> T.take 300 (lenient (BL.toStrict err)))
+    chaseModules = T.intercalate "\n" . map marker . T.splitOn "\n"
+    marker line
+      | Just p <- between "=== BEGIN " line = "# " <> p
+      | Just _ <- between "=== END " line = ""
+      | otherwise = line
+    between start line = do
+      rest <- T.stripPrefix start (T.stripEnd line)
+      T.strip <$> T.stripSuffix "===" rest
     pages t =
       T.intercalate "\n" $
         [ "# Page " <> T.pack (show n) <> "\n\n" <> p

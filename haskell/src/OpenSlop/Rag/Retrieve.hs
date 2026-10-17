@@ -253,6 +253,7 @@ instructions =
     , "Write each claim as a complete sentence in your own words that names what it is about, not a fragment copied from a source."
     , "Give one claim per fact, so each claim lists the sources for that fact alone. Read every source before deciding a part is not answered."
     , "Only state what a source says. If the sources do not answer a part, give it no claims and say what is missing in its gap; do not guess."
+    , "A source whose path ends in .chase is a summary of code: its signatures and types are exact, but its notes (lines starting with !, >, ? or %) were written by hand or by a model and can be out of date. When it disagrees with a source that is code, the code is right."
     , "Earlier turns of the conversation are context, not sources."
     ]
 
