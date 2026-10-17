@@ -82,7 +82,7 @@ data Talk = Talk
   , sources :: Int
   , rerankDepth :: Int
   , rerankMargin :: Double
-  , noSplit :: Bool
+  , split :: Bool
   , under :: [FilePath]
   }
 
@@ -124,7 +124,7 @@ talkP =
     <*> option auto (long "sources" <> value 6 <> showDefault <> help "the most sources one answer is given; a small model answers worse the more it is given")
     <*> rerankDepthP
     <*> rerankMarginP
-    <*> switch (long "no-split" <> help "search a question whole, even when it may ask several things")
+    <*> switch (long "split" <> help "have the model split a question that may ask several things, and search each part on its own")
     <*> underP
 
 rerankMarginP :: Parser Double
@@ -388,7 +388,7 @@ asking g conn t = do
       , rerankWith = rr
       , rerankDepth = t.rerankDepth
       , rerankMargin = t.rerankMargin
-      , splitQuestions = not t.noSplit
+      , splitQuestions = t.split
       , maxWait = t.maxWait
       , scope = sc
       }

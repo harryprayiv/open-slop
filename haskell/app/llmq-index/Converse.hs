@@ -77,6 +77,9 @@ data Selection = Selection
   -- ^ the question as searched, after rewriting against the history
   , searched :: [Text]
   -- ^ the parts searched separately; the query alone when it was not split
+  , found :: [[Hit]]
+  -- ^ each part's hits from the hybrid search, in its fused order, before
+  -- the reranker's depth cuts them
   , ranked :: [(Hit, Double)]
   -- ^ every part's candidates, best first, each scored relative to the
   -- best candidate of its own part (so each part's best is 0): the
@@ -97,6 +100,12 @@ data Selection = Selection
 -- another part's answer scores high. The reranker's depth is shared
 -- between the parts, at least 8 each, so a two-part question costs about
 -- what one part did.
+--
+-- Splitting is off unless asked for (llmq-index's --split). Measured on
+-- 2026-10-17 over the three evaluation sets, it kept the same 20 of 25
+-- answering chunks as searching whole, cost a model call per compound
+-- question, and sent more sources, because each part that the files cannot
+-- answer still contributes its own best candidates.
 select :: Asking -> [(Text, Text)] -> Text -> IO (Either Text Selection)
 select a history question = do
   cap <- readIORef a.capacity
@@ -118,10 +127,11 @@ select a history question = do
       scored <- traverse (scorePart a sc depthEach) parts
       case sequence scored of
         Left e -> pure (Left e)
-        Right perPart
-          | all null perPart -> pure (Left (if null sc then "nothing in the index matches that question" else "nothing under " <> T.intercalate ", " sc <> " matches that question"))
+        Right results
+          | all (null . snd) results -> pure (Left (if null sc then "nothing in the index matches that question" else "nothing under " <> T.intercalate ", " sc <> " matches that question"))
           | otherwise -> do
-              let ranked = mergeParts perPart
+              let found = map fst results
+                  ranked = mergeParts (map snd results)
                   margin = maybe relevanceMargin (const a.rerankMargin) a.rerankWith
                   close = [h | (h, s) <- ranked, s >= negate margin]
                   kept = take a.sources close
@@ -140,16 +150,17 @@ select a history question = do
                     <> T.pack (show (length packed))
                     <> " fit"
                 )
-              pure (Right Selection {query = q, searched = parts, ranked, kept, packed})
+              pure (Right Selection {query = q, searched = parts, found, ranked, kept, packed})
 
--- | One part's candidates, best first, scored relative to the best.
-scorePart :: Asking -> [Text] -> Int -> Text -> IO (Either Text [(Hit, Double)])
+-- | One part's hits from the search, and its candidates best first, scored
+-- relative to the best.
+scorePart :: Asking -> [Text] -> Int -> Text -> IO (Either Text ([Hit], [(Hit, Double)]))
 scorePart a sc depthEach part =
   retrieve a.client a.conn a.embedWith Retrieval {depth = a.depth, limit = 2 * a.depth, scope = sc} part >>= \case
     Left e -> pure (Left e)
-    Right [] -> pure (Right [])
+    Right [] -> pure (Right ([], []))
     Right hits -> case a.rerankWith of
-      Nothing -> pure (Right (relative (sortOn (Down . snd) [(h, h.similarity) | h <- hits])))
+      Nothing -> pure (Right (hits, relative (sortOn (Down . snd) [(h, h.similarity) | h <- hits])))
       Just rr -> do
         let candidates = take depthEach hits
         t0 <- getCurrentTime
@@ -170,7 +181,7 @@ scorePart a sc depthEach part =
                   <> " s, scores "
                   <> T.intercalate " " [T.pack (showFFloat (Just 2) s "") | (_, s) <- take 6 scored]
               )
-            pure (Right (relative scored))
+            pure (Right (hits, relative scored))
   where
     relative = \case
       [] -> []

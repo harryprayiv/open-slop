@@ -53,6 +53,11 @@
 -- margins should be chosen from: the largest "below best" among chunks
 -- that answer is the smallest margin that keeps them all.
 --
+-- An expected chunk that was not scored is reported with where the hybrid
+-- search placed it: past the reranker's depth (raise --rerank-depth), or
+-- not returned at all (raise --depth, or the question shares no words or
+-- meaning with the chunk the search can find).
+--
 -- When an expected chunk did not rank first, the candidates that ranked
 -- above it are printed with their scores, so a wrong case, a chunk that
 -- should have been left out of the index, and a retrieval miss can be told
@@ -128,6 +133,10 @@ instance FromJSON Cases where
 data Fate = Fate
   { indexed :: Int
   -- ^ chunks in the index that match; 0 means the case itself is wrong
+  , fusedRank :: Maybe (Int, Int)
+  -- ^ its position in the hybrid search's own order, and how many that
+  -- search returned, for the part that placed it highest; Nothing when the
+  -- search did not return it at all
   , rank :: Maybe Int
   -- ^ 1-based, among the scored candidates; Nothing when the search did
   -- not find it at all
@@ -230,8 +239,12 @@ one a o c =
                 let at = findIndex (matches e . fst) sel.ranked
                     hit = fmap (\i -> sel.ranked !! i) at
                     sentAt = findIndex (matches e) sel.packed
+                    fusedAt = case [(i + 1, length hs) | hs <- sel.found, Just i <- [findIndex (matches e) hs]] of
+                      [] -> Nothing
+                      xs -> Just (minimum xs)
                  in Fate
                       { indexed = inIndex
+                      , fusedRank = fusedAt
                       , rank = fmap (+ 1) at
                       , below = fmap (\(_, s) -> best - s) hit
                       , kept = any (matches e) sel.kept
@@ -258,7 +271,9 @@ describeFate (Expect alts) f =
     <> case f.rank of
       Nothing
         | f.indexed == 0 -> "NOT IN THE INDEX: the file was not ingested, or the phrase is not inside one chunk; fix the case"
-        | otherwise -> "NOT AMONG THE CANDIDATES scored (" <> tshow f.indexed <> " matching chunks in the index; raise --depth, or --rerank-depth with a reranker)"
+        | otherwise -> case f.fusedRank of
+            Just (k, total) -> "NOT AMONG THE CANDIDATES scored: the search placed it " <> tshow k <> " of " <> tshow total <> ", past the reranker's depth"
+            Nothing -> "NOT FOUND by the search (" <> tshow f.indexed <> " matching chunks in the index): neither the vector nor the word half returned it within --depth"
       Just r ->
         "rank "
           <> tshow r
