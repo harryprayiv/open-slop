@@ -11,11 +11,11 @@
 --      question is searched as asked.
 --   2. 'retrieve' embeds that query and runs the hybrid search, within the
 --      scope given, for up to 'depth' candidates.
---   3. 'relevant' drops hits that ranked poorly in both halves, and
---      'packSources' keeps as many of the rest as the model's capacity
---      leaves room for after the conversation and the answer. A model with
---      a 128K window gets far more sources than one with 4K; nothing here
---      fixes the number.
+--   3. 'relevant' drops hits whose vector is far from the question's
+--      compared with the closest hit, the caller keeps at most as many as
+--      it asks for (llmq-index's --sources), and 'packSources' keeps as
+--      many of those as the model's capacity leaves room for after the
+--      conversation and the answer.
 --   4. 'answerStream' sends the instructions with the numbered sources, the
 --      earlier turns and the question, and streams the answer as it comes.
 --      Answers are not capped; see "OpenSlop.Capacity".
@@ -32,6 +32,7 @@ module OpenSlop.Rag.Retrieve
   , Answer (..)
   , historyChars
   , relevant
+  , relevanceMargin
   , packSources
   , condense
   , answerStream
@@ -84,7 +85,7 @@ instructions :: Text
 instructions =
   T.unlines
     [ "You answer questions about the user's own files using the numbered sources below."
-    , "Cite every claim that comes from a source with its number in square brackets, like [2]."
+    , "Cite every claim that comes from a source with its number in square brackets, like [2]. End every sentence that uses a source with that source's number."
     , "If the sources do not contain the answer, say so plainly and say what they do contain; do not guess."
     , "Do not cite a number that is not in the list. Earlier turns of the conversation are context, not sources."
     ]
@@ -104,13 +105,35 @@ renderSource n h =
     <> h.body
     <> "\n"
 
--- | Hits that ranked in the top ten of either half of the search. Reciprocal
--- rank fusion gives every candidate a score, so without a cut a large
--- window would be filled with the fortieth-best match, which costs reading
--- time and gives the model more to be misled by. A hit found by both halves
--- passes even when neither rank alone is in the top ten.
+-- | Hits whose cosine similarity to the question is within
+-- 'relevanceMargin' of the closest hit's, in their fused order.
+--
+-- This replaced a cut on the fused score (rank in the top ten of either
+-- half), which could not reject anything: the word half matches any of the
+-- question's words, so every candidate ranks somewhere, and with --depth 10
+-- every one of them was "in the top ten". On 2026-10-16 that sent 19 of 19
+-- candidates for "which machine holds the binary cache, and on what port?",
+-- homebeacon and seedbox chunks among them, and the 7B answered without
+-- citing any. Similarity is a measure of closeness rather than of rank, so
+-- a candidate the word half found only because it contains "machine" is
+-- dropped.
+--
+-- The margin is relative because absolute similarities depend on the
+-- embedding model: two models put the same pair of texts at different
+-- values, while the gap between a close chunk and an unrelated one is
+-- comparable across them. llmq-index search prints each hit's
+-- similarity, which is how to check the margin against a real index.
 relevant :: [Hit] -> [Hit]
-relevant = filter (\h -> h.score >= 1 / 70)
+relevant hits = case hits of
+  [] -> []
+  _ -> filter (\h -> h.similarity >= best - relevanceMargin) hits
+  where
+    best = maximum (map (.similarity) hits)
+
+-- | How far below the closest hit's similarity a hit may be and still be
+-- sent to the model.
+relevanceMargin :: Double
+relevanceMargin = 0.08
 
 -- | The best hits that fit, in order, given the characters already taken
 -- by the conversation and the question.

@@ -5,11 +5,11 @@
         "systems": "systems"
       },
       "locked": {
-        "lastModified": 1731533236,
-        "narHash": "sha256-l0KFg5HjrsfsO/JpG+r7fRrqm12kzFHyUHqHCVpMMbI=",
+        "lastModified": 1791914995,
+        "narHash": "sha256-Zf/xfQEAasnwnmEfHqW/4hjDE/s44yn2hD4RuVIZRjA=",
         "owner": "numtide",
         "repo": "flake-utils",
-        "rev": "11707dc2f618dd54ca8739b309ec4fc024de578b",
+        "rev": "b7a79d3fea1e214f6d668d521cecec0c01e26544",
         "type": "github"
       },
       "original": {
@@ -61,11 +61,11 @@
     "llama-cpp-prismml": {
       "flake": false,
       "locked": {
-        "lastModified": 1790361756,
-        "narHash": "sha256-SNBAC+dNTwQxpGmKyG7i/8eqCNg6985DXtqGbzWgwFA=",
+        "lastModified": 1792168437,
+        "narHash": "sha256-6bIUB6CHjHYHQ8aSI+eeXyyRpKG/9hylGZDAXXAJxlI=",
         "owner": "PrismML-Eng",
         "repo": "llama.cpp",
-        "rev": "adfffbe41b2cabcd51fff326ab045662265062bb",
+        "rev": "0082ac24a89ae62132041b40e2c0170e278a98f4",
         "type": "github"
       },
       "original": {

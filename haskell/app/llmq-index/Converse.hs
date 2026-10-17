@@ -40,6 +40,8 @@ data Asking = Asking
   , chatTo :: Chat
   , capacity :: IORef Capacity
   , depth :: Int
+  , sources :: Int
+  -- ^ the most sources one answer is given, after 'relevant'
   , maxWait :: Maybe Double
   , scope :: IORef [Text]
   }
@@ -64,8 +66,20 @@ turn a history question = do
         Right [] -> pure (Left (if null sc then "nothing in the index matches that question" else "nothing under " <> T.intercalate ", " sc <> " matches that question"))
         Right hits -> do
           let good = relevant hits
-              packed = packSources cap a.maxWait (historyChars cap a.maxWait history question) good
-          say (T.pack (show (length good)) <> " relevant of " <> T.pack (show (length hits)) <> " found, " <> T.pack (show (length packed)) <> " fit; answering")
+              kept = take a.sources good
+              packed = packSources cap a.maxWait (historyChars cap a.maxWait history question) kept
+          say
+            ( T.pack (show (length good))
+                <> " relevant of "
+                <> T.pack (show (length hits))
+                <> " found, "
+                <> T.pack (show (length kept))
+                <> " kept (--sources "
+                <> T.pack (show a.sources)
+                <> "), "
+                <> T.pack (show (length packed))
+                <> " fit; answering"
+            )
           r <- try (answerStream a.client a.chatTo cap a.maxWait history question packed (\t -> TIO.putStr t >> hFlush stdout))
           TIO.putStrLn ""
           case r of

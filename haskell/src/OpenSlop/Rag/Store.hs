@@ -237,6 +237,11 @@ data Hit = Hit
   , score :: Double
   , viaVector :: Bool
   , viaWords :: Bool
+  , similarity :: Double
+  -- ^ cosine similarity of this chunk's vector to the question's, from -1
+  -- to 1, whichever half found it. Unlike 'score', which only says how a
+  -- chunk ranked among the candidates, this says how close it is, so it
+  -- can tell a weak candidate from a strong one.
   }
   deriving stock (Show)
 
@@ -253,6 +258,10 @@ data Hit = Hit
 -- A non-empty scope keeps only documents whose path starts with one of the
 -- given prefixes, in both halves, so the candidates are drawn from the
 -- scope rather than filtered out of the whole index afterwards.
+--
+-- Every hit also carries its cosine similarity to the question, computed
+-- for word matches too, so "OpenSlop.Rag.Retrieve" can drop candidates
+-- that are far from the question however they ranked.
 search :: Connection -> Text -> [Double] -> Text -> [Text] -> Int -> Int -> IO [Hit]
 search conn model qvec qtext scope depth limit = do
   let dims = length qvec
@@ -282,8 +291,16 @@ search conn model qvec qtext scope depth limit = do
              \  SELECT id, sum(1.0 / (60 + r))::float8 AS score,\
              \   bool_or(src = 'v') AS via_v, bool_or(src = 'k') AS via_k\
              \  FROM (SELECT id, r, 'v' AS src FROM v UNION ALL SELECT id, r, 'k' FROM k) u GROUP BY id)\
-             \ SELECT d.path, c.heading, c.body, c.line_from, c.line_to, f.score, f.via_v, f.via_k\
+             \ SELECT d.path, c.heading, c.body, c.line_from, c.line_to, f.score, f.via_v, f.via_k,\
+             \  (1 - (s.embedding::vector("
+          <> d
+          <> ") <=> ?::vector("
+          <> d
+          <> ")))::float8\
              \ FROM f JOIN rag_chunks c ON c.id = f.id JOIN rag_documents d ON d.id = c.document_id\
+             \ JOIN rag_embeddings s ON s.chunk_id = c.id AND s.model = ? AND s.dims = "
+          <> d
+          <> "\
              \ ORDER BY f.score DESC, d.path, c.ordinal LIMIT ?"
       lit = vectorLiteral qvec
       patterns = PGArray (map likePrefix scope)
@@ -292,9 +309,9 @@ search conn model qvec qtext scope depth limit = do
         | otherwise = " AND " <> alias <> ".path LIKE ANY (?)"
   rows <-
     if null scope
-      then query conn (fromString (T.unpack sql)) (lit, model, lit, depth, qtext, depth, limit)
-      else query conn (fromString (T.unpack sql)) ((lit, model, patterns, lit, depth, qtext) :. (patterns, depth, limit))
-  pure [Hit p h b lf lt s vv vk | (p, h, b, lf, lt, s, vv, vk) <- rows]
+      then query conn (fromString (T.unpack sql)) ((lit, model, lit, depth, qtext, depth) :. (lit, model, limit))
+      else query conn (fromString (T.unpack sql)) ((lit, model, patterns, lit, depth, qtext) :. (patterns, depth, lit, model, limit))
+  pure [Hit p h b lf lt s vv vk sim | (p, h, b, lf, lt, s, vv, vk, sim) <- rows]
 
 -- | Remove one model's vectors, or every document under a root.
 prune :: Connection -> Either Text Text -> IO Int64

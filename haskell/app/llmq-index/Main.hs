@@ -19,10 +19,12 @@
 --
 -- How much one question may carry (conversation, sources, answer) comes
 -- from "OpenSlop.Capacity": the window the chat server reports within the
--- catalogue's limit, and the characters per token llmq-bench measured. No
--- count of sources and no answer length is fixed here. --max-wait limits
--- the prompt further, by the measured prefill rate, when an answer is
--- wanted within a given time on slow hardware.
+-- catalogue's limit, and the characters per token llmq-bench measured.
+-- Sources are first cut to the relevant ones (see
+-- "OpenSlop.Rag.Retrieve".relevant) and to at most --sources of them, then
+-- packed into that capacity. No answer length is fixed here. --max-wait
+-- limits the prompt further, by the measured prefill rate, when an answer
+-- is wanted within a given time on slow hardware.
 module Main (main) where
 
 import Control.Exception (SomeException, try)
@@ -42,7 +44,7 @@ import OpenSlop.Http (Client, newClient)
 import OpenSlop.Measured (loadCatalogue, measuredPath, readMeasured)
 import OpenSlop.Rag.Embed (Embedder (..), embedder)
 import OpenSlop.Rag.Locality (Lan, onLan)
-import OpenSlop.Rag.Retrieve (Chat (..), Retrieval (..), retrieve)
+import OpenSlop.Rag.Retrieve (Chat (..), Retrieval (..), relevanceMargin, retrieve)
 import OpenSlop.Rag.Split (SplitConfig (..), defaultSplit)
 import OpenSlop.Rag.Store
 import Options.Applicative
@@ -63,6 +65,7 @@ data Talk = Talk
   , chatModel :: Maybe String
   , maxWait :: Maybe Double
   , depth :: Int
+  , sources :: Int
   , under :: [FilePath]
   }
 
@@ -97,6 +100,7 @@ talkP =
     <*> optional (strOption (long "model" <> metavar "NAME" <> help "chat model (default $OPEN_SLOP_RAG_CHAT_MODEL)"))
     <*> optional (option auto (long "max-wait" <> metavar "SECS" <> help "keep the prompt small enough to be read within this time, at the measured prefill rate"))
     <*> option auto (long "depth" <> value 40 <> showDefault <> help "candidates from each half of the search")
+    <*> option auto (long "sources" <> value 6 <> showDefault <> help "the most sources one answer is given; a small model answers worse the more it is given")
     <*> underP
 
 commandP :: Parser Command
@@ -181,6 +185,7 @@ main = do
       retrieve client conn e Retrieval {depth = d, limit = l, scope = sc} q >>= \case
         Left err -> die' err
         Right hits -> do
+          let best = if null hits then 0 else maximum (map (.similarity) hits)
           when (null hits) (say "no matches")
           forM_ (zip [1 :: Int ..] hits) \(n, h) -> do
             TIO.putStrLn
@@ -194,6 +199,9 @@ main = do
                   <> T.pack (show h.lineTo)
                   <> "  score "
                   <> T.pack (showFFloat (Just 4) h.score "")
+                  <> "  similarity "
+                  <> T.pack (showFFloat (Just 3) h.similarity "")
+                  <> (if h.similarity >= best - relevanceMargin then "" else "  (dropped by relevance)")
                   <> via h
               )
             unless (T.null h.heading) (TIO.putStrLn ("    " <> h.heading))
@@ -281,6 +289,7 @@ asking g conn t = do
       , chatTo = Chat {server = lan, engine = b.engine, model}
       , capacity = capRef
       , depth = t.depth
+      , sources = t.sources
       , maxWait = t.maxWait
       , scope = sc
       }
