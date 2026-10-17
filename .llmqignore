@@ -3,6 +3,5 @@
 eval/
 # Documentation lags the code, so answers come from the code alone.
 docs/
-*.md
 # Recorded model outputs used as test expectations.
 golden/
