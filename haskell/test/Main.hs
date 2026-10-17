@@ -23,6 +23,7 @@ import OpenSlop.Gateway.Keys (authorise, parseKeys)
 import OpenSlop.Gateway.Route (Target, resolveTarget, targetId)
 import OpenSlop.Gateway.Translate (Call (..), Reply (..), parseBackendReply, plan)
 import OpenSlop.OpenAI
+import OpenSlop.Rag.Exclude (excluded, parsePatterns, secretKind)
 import OpenSlop.Rag.Locality (hostOf, privateHost)
 import OpenSlop.Rag.Retrieve (Claim (..), answerSchema, citedSources, decodeAnswer, renderAnswer)
 import OpenSlop.Rag.Split (Piece (..), SplitConfig (SplitConfig), Structure (..), split)
@@ -83,6 +84,8 @@ main =
           , testCase "headings become the chunk's path" splitHeadings
           , testCase "a heading inside a code fence is not a heading" splitFence
           , testCase "a comment in code is not a heading" splitFlat
+          , testCase "ignore patterns match as in a .gitignore" ignorePatterns
+          , testCase "secrets are recognised by their content" secrets
           , testCase "hosts are read out of URLs" hosts
           , testCase "only LAN hosts are private" locality
           , testCase "citations are read back out of a reply" citations
@@ -370,6 +373,28 @@ splitFlat = do
       ps = split (SplitConfig 1000 1000) Flat doc
   map (.heading) ps @?= [[]]
   map (\p -> (p.lineFrom, p.lineTo)) ps @?= [(1, 5)]
+
+ignorePatterns :: Assertion
+ignorePatterns = do
+  let ps = parsePatterns ["# a comment", "", "nerd.nix", "*.json", "secrets/", "docs/old/**", "imgs/*.txt"]
+      ex p d = excluded ps (T.splitOn "/" p) d
+  ex "modules/home/glyphs/nerd.nix" False @?= True
+  ex "modules/home/laptop/audio/fartknocker.json" False @?= True
+  ex "secrets" True @?= True
+  ex "secrets" False @?= False
+  ex "docs/old/a/b.md" False @?= True
+  ex "docs/Plan.md" False @?= False
+  ex "imgs/groot.txt" False @?= True
+  ex "modules/imgs/groot.txt" False @?= False
+  ex "modules/system/cache.nix" False @?= False
+
+secrets :: Assertion
+secrets = do
+  secretKind "data: ENC[AES256_GCM,data:abc,iv:x,tag:y,type:str]\nsops:\n" @?= Just "sops-encrypted"
+  secretKind "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n" @?= Just "a private key"
+  secretKind "AGE-SECRET-KEY-1QQQQ" @?= Just "an age secret key"
+  secretKind "-----BEGIN PUBLIC KEY-----\nabc\n" @?= Nothing
+  secretKind "port = 8080;" @?= Nothing
 
 hosts :: Assertion
 hosts = do

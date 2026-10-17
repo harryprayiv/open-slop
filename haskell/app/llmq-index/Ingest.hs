@@ -4,8 +4,9 @@
 -- and vectors for the embedding model are already stored is skipped
 -- without being read past the hash. A changed file is replaced whole, in
 -- one transaction, so a crash mid-run leaves every file either at its old
--- state or its new one. Files that have gone from a root are removed at the
--- end of a run over it.
+-- state or its new one. Files that have gone from a root, or that are now
+-- excluded (see "OpenSlop.Rag.Exclude"), are removed at the end of a run
+-- over it.
 module Ingest
   ( IngestOpts (..)
   , ingestRoot
@@ -25,6 +26,7 @@ import Data.Text.IO qualified as TIO
 import Extract (classify, extract, kindName, skipDir, structureOf)
 import OpenSlop.Http (Client)
 import OpenSlop.Rag.Embed (Embedder (..), Purpose (ForDocument), embed)
+import OpenSlop.Rag.Exclude (Pattern, excluded, ignoreFile, parsePatterns, readIgnoreFile, secretKind)
 import OpenSlop.Rag.Split (SplitConfig (..), defaultSplit, embedText, split)
 import OpenSlop.Rag.Store (Connection, DocState (..), Document (..), docState, ensureIndex, removeMissing, replaceDocument)
 import System.Directory (canonicalizePath, doesDirectoryExist, getFileSize, listDirectory, pathIsSymbolicLink)
@@ -37,36 +39,61 @@ data IngestOpts = IngestOpts
   , maxBytes :: Integer
   , target :: Int
   , dryRun :: Bool
+  , excludes :: [Text]
+  -- ^ patterns from --exclude, added to the root's .llmqignore
   }
 
 say :: Text -> IO ()
 say = TIO.hPutStrLn stderr . ("llmq-index: " <>)
 
 -- | Every regular file under a directory, not following symlinks, skipping
--- the directories 'skipDir' names, in sorted order.
-walk :: FilePath -> IO [FilePath]
-walk dir = do
-  names <- sort <$> listDirectory dir
-  concat
-    <$> traverse
-      ( \n -> do
-          let p = dir </> n
-          link <- pathIsSymbolicLink p
-          isDir <- doesDirectoryExist p
-          if
-            | link -> pure []
-            | isDir -> if skipDir n then pure [] else walk p
-            | otherwise -> pure [p]
-      )
-      names
+-- the directories 'skipDir' names and whatever the patterns exclude, in
+-- sorted order, with how many paths the patterns excluded. An excluded
+-- directory counts once and is not walked into.
+walk :: [Pattern] -> FilePath -> IO ([FilePath], Int)
+walk patterns root = go []
+  where
+    go rel = do
+      names <- sort <$> listDirectory (foldl (</>) root (map T.unpack rel))
+      results <-
+        traverse
+          ( \n -> do
+              let relPath = rel <> [T.pack n]
+                  p = foldl (</>) root (map T.unpack relPath)
+              link <- pathIsSymbolicLink p
+              isDir <- doesDirectoryExist p
+              if
+                | link -> pure ([], 0)
+                | isDir && skipDir n -> pure ([], 0)
+                | excluded patterns relPath isDir -> pure ([], 1)
+                | isDir -> go relPath
+                | otherwise -> pure ([p], 0)
+          )
+          names
+      pure (concatMap fst results, sum (map snd results))
 
-data Tally = Tally {fresh :: Int, written :: Int, skipped :: Int, failed :: Int, chunks :: Int}
+data Tally = Tally {fresh :: Int, written :: Int, skipped :: Int, failed :: Int, secrets :: Int, chunks :: Int}
 
 ingestRoot :: Client -> Connection -> Embedder -> IngestOpts -> FilePath -> IO ()
 ingestRoot client conn e o dir = do
   root <- canonicalizePath dir
-  files <- walk root
-  say (T.pack root <> ": " <> T.pack (show (length files)) <> " files")
+  fromFile <- readIgnoreFile root
+  let patterns = fromFile <> parsePatterns o.excludes
+  (files, excludedPaths) <- walk patterns root
+  say
+    ( T.pack root
+        <> ": "
+        <> T.pack (show (length files))
+        <> " files, "
+        <> T.pack (show excludedPaths)
+        <> " paths excluded by "
+        <> T.pack (show (length fromFile))
+        <> " patterns in "
+        <> T.pack ignoreFile
+        <> " and "
+        <> T.pack (show (length o.excludes))
+        <> " from --exclude"
+    )
   indexed <- newIORef False
   seen <- newIORef []
   let cfg = defaultSplit {target = o.target, hardLimit = max o.target (o.target * 3 `div` 2)}
@@ -84,42 +111,47 @@ ingestRoot client conn e o dir = do
                 raw <- B.readFile path
                 let sha = TE.decodeUtf8 (B16.encode (SHA256.hash raw))
                     p = T.pack path
-                modifyIORef' seen (p :)
-                st <- if o.dryRun then pure Changed else docState conn e.model p sha
-                if st == Fresh
-                  then pure t {fresh = t.fresh + 1}
-                  else
-                    extract kind path raw >>= \case
-                      Left why -> do
-                        say ("skip " <> p <> ": " <> why)
-                        pure t {failed = t.failed + 1}
-                      Right text -> do
-                        let pieces = split cfg (structureOf kind) text
-                        if o.dryRun
-                          then do
-                            TIO.putStrLn (p <> "  " <> kindName kind <> "  " <> T.pack (show (length pieces)) <> " chunks")
-                            pure t {written = t.written + 1, chunks = t.chunks + length pieces}
-                          else
-                            embedAll (map embedText pieces) >>= \case
-                              Left why -> do
-                                say ("skip " <> p <> ": " <> why)
-                                pure t {failed = t.failed + 1}
-                              Right vectors -> do
-                                replaceDocument
-                                  conn
-                                  e.model
-                                  Document {root = T.pack root, path = p, sha256 = sha, kind = kindName kind, bytes = fromIntegral size}
-                                  pieces
-                                  vectors
-                                case vectors of
-                                  (v : _) -> do
-                                    done <- readIORef indexed
-                                    unless done (ensureIndex conn e.model (length v) >> modifyIORef' indexed (const True))
-                                  [] -> pure ()
-                                say (p <> ": " <> T.pack (show (length pieces)) <> " chunks")
+                case secretKind raw of
+                  Just why -> do
+                    say ("never indexed, " <> why <> ": " <> p)
+                    pure t {secrets = t.secrets + 1}
+                  Nothing -> do
+                    modifyIORef' seen (p :)
+                    st <- if o.dryRun then pure Changed else docState conn e.model p sha
+                    if st == Fresh
+                      then pure t {fresh = t.fresh + 1}
+                      else
+                        extract kind path raw >>= \case
+                          Left why -> do
+                            say ("skip " <> p <> ": " <> why)
+                            pure t {failed = t.failed + 1}
+                          Right text -> do
+                            let pieces = split cfg (structureOf kind) text
+                            if o.dryRun
+                              then do
+                                TIO.putStrLn (p <> "  " <> kindName kind <> "  " <> T.pack (show (length pieces)) <> " chunks")
                                 pure t {written = t.written + 1, chunks = t.chunks + length pieces}
+                              else
+                                embedAll (map embedText pieces) >>= \case
+                                  Left why -> do
+                                    say ("skip " <> p <> ": " <> why)
+                                    pure t {failed = t.failed + 1}
+                                  Right vectors -> do
+                                    replaceDocument
+                                      conn
+                                      e.model
+                                      Document {root = T.pack root, path = p, sha256 = sha, kind = kindName kind, bytes = fromIntegral size}
+                                      pieces
+                                      vectors
+                                    case vectors of
+                                      (v : _) -> do
+                                        done <- readIORef indexed
+                                        unless done (ensureIndex conn e.model (length v) >> modifyIORef' indexed (const True))
+                                      [] -> pure ()
+                                    say (p <> ": " <> T.pack (show (length pieces)) <> " chunks")
+                                    pure t {written = t.written + 1, chunks = t.chunks + length pieces}
       )
-      (Tally 0 0 0 0 0)
+      (Tally 0 0 0 0 0 0)
       files
   removed <-
     if o.dryRun
@@ -138,6 +170,8 @@ ingestRoot client conn e o dir = do
         <> " not indexable, "
         <> T.pack (show t.failed)
         <> " failed, "
+        <> T.pack (show t.secrets)
+        <> " secrets left out, "
         <> T.pack (show removed)
         <> " removed"
     )

@@ -2,7 +2,11 @@
 -- from it, alone or as a conversation, without the files leaving the LAN.
 --
 --   llmq-index init                       create the tables
---   llmq-index ingest DIR...              walk, extract, split, embed, store
+--   llmq-index ingest DIR...              walk, extract, split, embed, store;
+--                                         each DIR's .llmqignore and --exclude
+--                                         leave paths out, and secrets are
+--                                         never indexed; see
+--                                         "OpenSlop.Rag.Exclude"
 --   llmq-index search QUESTION            the hits, with scores and sources
 --   llmq-index ask QUESTION               one cited answer, streamed
 --   llmq-index chat [--session NAME]      a conversation, stored by name
@@ -145,6 +149,7 @@ commandP =
         <*> option auto (long "max-bytes" <> value (20 * 1024 * 1024) <> showDefault <> help "skip files larger than this")
         <*> option auto (long "chunk-chars" <> value defaultSplit.target <> showDefault <> help "characters a chunk is packed up to")
         <*> switch (long "dry-run" <> help "walk and split, print what would be embedded, write nothing")
+        <*> many (T.pack <$> strOption (long "exclude" <> metavar "GLOB" <> help "leave out paths matching this, as in a .llmqignore line; repeat for several"))
     searchP =
       Search
         <$> (T.pack <$> strArgument (metavar "QUESTION"))

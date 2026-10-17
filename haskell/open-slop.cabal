@@ -69,6 +69,7 @@ library
     OpenSlop.Measured
     OpenSlop.OpenAI
     OpenSlop.Rag.Embed
+    OpenSlop.Rag.Exclude
     OpenSlop.Rag.Locality
     OpenSlop.Rag.Rerank
     OpenSlop.Rag.Retrieve
