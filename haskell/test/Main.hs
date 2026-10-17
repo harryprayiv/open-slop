@@ -24,7 +24,7 @@ import OpenSlop.Gateway.Route (Target, resolveTarget, targetId)
 import OpenSlop.Gateway.Translate (Call (..), Reply (..), parseBackendReply, plan)
 import OpenSlop.OpenAI
 import OpenSlop.Rag.Locality (hostOf, privateHost)
-import OpenSlop.Rag.Retrieve (citedSources)
+import OpenSlop.Rag.Retrieve (Claim (..), answerSchema, citedSources, decodeAnswer, renderAnswer)
 import OpenSlop.Rag.Split (Piece (..), SplitConfig (SplitConfig), Structure (..), split)
 import System.Directory (createDirectory, createDirectoryIfMissing, createFileLink, getTemporaryDirectory, removePathForcibly)
 import System.FilePath ((</>))
@@ -86,6 +86,7 @@ main =
           , testCase "hosts are read out of URLs" hosts
           , testCase "only LAN hosts are private" locality
           , testCase "citations are read back out of a reply" citations
+          , testCase "an answer's claims each carry their own sources" answers
           ]
       , testGroup
           "capacity"
@@ -388,6 +389,27 @@ citations :: Assertion
 citations = do
   citedSources "It is in [2] and [1, 3]; see also [link] and [12]." @?= [1, 2, 3, 12]
   citedSources "no sources" @?= []
+
+-- The answer as the schema makes the model write it, and the schema's
+-- bounds on source numbers; checked 2026-10-17 to convert to a grammar with
+-- llama.cpp's converter.
+answers :: Assertion
+answers = do
+  let reply = "{\"claims\":[{\"claim\":\"The cache runs on blade.\",\"sources\":[3]},{\"claim\":\"It listens on port 8080.\",\"sources\":[1,2]}],\"gaps\":\"\"}"
+  case decodeAnswer 3 reply of
+    Left e -> assertFailure (T.unpack e)
+    Right (cs, g, cited, invented) -> do
+      map (.sources) cs @?= [[3], [1, 2]]
+      (g, cited, invented) @?= ("", [1, 2, 3], [])
+      renderAnswer cs g @?= "The cache runs on blade. [3]\nIt listens on port 8080. [1][2]"
+  case decodeAnswer 2 "{\"claims\":[{\"claim\":\"x\",\"sources\":[5]}],\"gaps\":\"\"}" of
+    Right (_, _, _, invented) -> invented @?= [5]
+    Left e -> assertFailure (T.unpack e)
+  assertBool "prose is refused" (isLeft (decodeAnswer 2 "The cache runs on blade [1]."))
+  let items = field "properties" (answerSchema 4) >>= field "claims" >>= field "items" >>= field "properties" >>= field "sources"
+  (items >>= field "items" >>= field "enum") @?= Just (Aeson.toJSON [1 .. 4 :: Int])
+  (items >>= field "minItems") @?= Just (Number 1)
+  (field "properties" (answerSchema 0) >>= field "claims" >>= field "maxItems") @?= Just (Number 0)
 
 -- ---------------------------------------------------------------------------
 -- capacity

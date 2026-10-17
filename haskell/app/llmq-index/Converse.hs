@@ -1,9 +1,11 @@
 -- | Asking the index: one question, or a conversation kept in the database.
 --
 -- Part of llmq-index; Main describes the program, and "OpenSlop.Rag.Retrieve"
--- describes one turn. This module adds the terminal around it: the answer is
--- printed as it streams, the sources follow with the cited ones marked, and
--- in a conversation every turn is stored under the session's name, so
+-- describes one turn. This module adds the terminal around it: the raw JSON
+-- of the answer streams to stderr as progress, the answer is then printed
+-- claim by claim with its sources, the sources follow with the cited ones
+-- marked, and in a conversation every turn is stored under the session's
+-- name, so
 -- `llmq-index chat --session NAME` continues where it stopped, on any
 -- machine that reaches the database.
 --
@@ -81,14 +83,15 @@ turn a history question = do
             answer cap packed
   where
     answer cap packed = do
-      r <- try (answerStream a.client a.chatTo cap a.maxWait history question packed (\t -> TIO.putStr t >> hFlush stdout))
-      TIO.putStrLn ""
+      r <- try (answerStream a.client a.chatTo cap a.maxWait history question packed (\t -> TIO.hPutStr stderr t >> hFlush stderr))
+      TIO.hPutStrLn stderr ""
       case r of
         Left UserInterrupt -> pure (Left "stopped")
         Left e -> throwIO e
         Right (Left e) -> pure (Left e)
         Right (Right ans) -> do
           forM_ ans.promptTokens \n -> modifyIORef' a.capacity (\c -> learn c ans.promptChars n)
+          TIO.putStrLn ans.text
           showSources ans
           pure (Right ans)
 
@@ -155,7 +158,7 @@ showSources ans = do
           <> T.pack (show h.lineTo)
           <> (if T.null h.heading then "" else "  " <> h.heading)
       )
-  when (null ans.cited) (say "the answer cites no source; treat it as unsupported by your files")
+  when (null ans.claims) (say "the answer makes no claim from your files")
   unless (null ans.invented) (say ("the answer cites sources it was not given: " <> T.pack (show ans.invented)))
 
 askOnce :: Asking -> Text -> IO Bool

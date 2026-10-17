@@ -17,11 +17,22 @@
 --      many of those as the model's capacity leaves room for after the
 --      conversation and the answer.
 --   4. 'answerStream' sends the instructions with the numbered sources, the
---      earlier turns and the question, and streams the answer as it comes.
---      Answers are not capped; see "OpenSlop.Capacity".
---   5. 'citedSources' reads the source numbers back out of the answer, so a
---      caller can show what was used and flag an answer that cites nothing
---      or cites a number it was never given.
+--      earlier turns and the question, constrained to 'answerSchema': a
+--      list of claims, each with the numbers of the sources it comes from,
+--      and a note of what the sources do not say. The server turns the
+--      schema into a grammar, so a claim without a source, or a source
+--      number that was not given, cannot be produced at all. Answers are
+--      not capped; see "OpenSlop.Capacity".
+--   5. The reply is decoded into an 'Answer' and rendered as text with the
+--      numbers after each claim.
+--
+-- Until 2026-10-17 the answer was free text and 'citedSources' read the
+-- numbers back out of it afterwards. A 7B often wrote none, and when it
+-- wrote one it covered the whole answer: "blade, port 8080 [1]" cited the
+-- source for the port and not the one that named blade. Checking after the
+-- fact could only warn; the schema makes every claim carry its own sources
+-- in the same way the agent's decisions are typed (OpenSlop.Agent.Action).
+-- 'citedSources' stays for reading numbers out of earlier free-text turns.
 --
 -- Every server here is a 'Lan'; see "OpenSlop.Rag.Locality". The request
 -- itself is made by "OpenSlop.ChatStream".
@@ -30,6 +41,10 @@ module OpenSlop.Rag.Retrieve
   , retrieve
   , Chat (..)
   , Answer (..)
+  , Claim (..)
+  , answerSchema
+  , decodeAnswer
+  , renderAnswer
   , historyChars
   , relevant
   , relevanceMargin
@@ -41,13 +56,16 @@ module OpenSlop.Rag.Retrieve
   , judgeCitations
   ) where
 
-import Data.Aeson (Value (..), object, (.=))
+import Data.Aeson (FromJSON (..), Value (..), object, withObject, (.:), (.=))
+import Data.Aeson qualified as Aeson
 import Data.Char (isDigit)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (nub, sort)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import OpenSlop.Capacity (Capacity (..), promptCharsWithin)
+import OpenSlop.Catalogue (Engine (..))
 import OpenSlop.ChatStream (Ask (..), Chat (..), plainAsk, streamChat)
 import OpenSlop.Http (Client)
 import OpenSlop.Rag.Embed (Embedder (..), Purpose (..), embed)
@@ -69,25 +87,114 @@ retrieve client conn e r query =
     Right [v] -> Right <$> search conn e.model v query r.scope r.depth r.limit
     Right _ -> pure (Left "the embedding server returned no vector for the question")
 
+-- | One statement of the answer and the sources it rests on. The field
+-- names are in the order the grammar makes the model write them, which is
+-- alphabetical: the claim first, then where it came from.
+data Claim = Claim
+  { claim :: Text
+  , sources :: [Int]
+  -- ^ 1-based numbers of the sources given, at least one
+  }
+  deriving stock (Eq, Show)
+
+instance FromJSON Claim where
+  parseJSON = withObject "claim" \o -> Claim <$> o .: "claim" <*> o .: "sources"
+
+data Reply = Reply [Claim] Text
+
+instance FromJSON Reply where
+  parseJSON = withObject "answer" \o -> Reply <$> o .: "claims" <*> o .: "gaps"
+
 data Answer = Answer
   { text :: Text
+  -- ^ the claims rendered, each followed by its source numbers
+  , claims :: [Claim]
+  , gaps :: Text
+  -- ^ what the model says the sources do not contain; empty when nothing
   , sources :: [Hit]
   , cited :: [Int]
-  -- ^ source numbers the answer cites, 1-based, in the range given
+  -- ^ source numbers the claims cite, 1-based, in the range given
   , invented :: [Int]
-  -- ^ source numbers the answer cites that were never given
+  -- ^ source numbers outside the range; empty unless the server ignored
+  -- the schema
   , promptTokens :: Maybe Int
   -- ^ as the server counted them, when it says
   , promptChars :: Int
   }
 
+-- | The JSON Schema an answer from n sources must match. Every claim names
+-- at least one source, and a source is one of the numbers 1..n, as an enum
+-- so the grammar cannot produce any other. With no sources the claims list
+-- must be empty, and gaps says why.
+answerSchema :: Int -> Value
+answerSchema n =
+  object
+    [ "type" .= ("object" :: Text)
+    , "properties"
+        .= object
+          [ "claims"
+              .= object
+                ( [ "type" .= ("array" :: Text)
+                  , "items"
+                      .= object
+                        [ "type" .= ("object" :: Text)
+                        , "properties"
+                            .= object
+                              [ "claim" .= object ["type" .= ("string" :: Text)]
+                              , "sources"
+                                  .= object
+                                    [ "type" .= ("array" :: Text)
+                                    , "items" .= object ["enum" .= [1 .. max 1 n]]
+                                    , "minItems" .= (1 :: Int)
+                                    ]
+                              ]
+                        , "required" .= ["claim", "sources" :: Text]
+                        , "additionalProperties" .= False
+                        ]
+                  ]
+                    <> ["maxItems" .= (0 :: Int) | n < 1]
+                )
+          , "gaps" .= object ["type" .= ("string" :: Text)]
+          ]
+    , "required" .= ["claims", "gaps" :: Text]
+    , "additionalProperties" .= False
+    ]
+
+-- | The reply, read against the number of sources given. A code fence
+-- around it is tolerated; anything that is not the schema's shape is an
+-- error with the start of what came back.
+decodeAnswer :: Int -> Text -> Either Text ([Claim], Text, [Int], [Int])
+decodeAnswer n raw =
+  case Aeson.eitherDecodeStrict (TE.encodeUtf8 (unfence (T.strip raw))) of
+    Left err -> Left ("the answer is not the expected JSON (" <> T.pack err <> "): " <> T.take 200 raw)
+    Right (Reply cs g) ->
+      let ns = sort (nub (concatMap (.sources) cs))
+          inRange k = k >= 1 && k <= n
+       in Right (cs, T.strip g, filter inRange ns, filter (not . inRange) ns)
+  where
+    unfence t
+      | "```" `T.isPrefixOf` t = T.strip (T.dropWhileEnd (== '`') (T.dropWhile (/= '\n') t))
+      | otherwise = t
+
+-- | Each claim on its own line with its sources, then the gaps.
+renderAnswer :: [Claim] -> Text -> Text
+renderAnswer cs g =
+  T.intercalate
+    "\n"
+    ( [ c.claim <> " " <> T.concat ["[" <> T.pack (show k) <> "]" | k <- c.sources]
+      | c <- cs
+      ]
+        <> ["Not in the sources: " <> g | not (T.null g)]
+    )
+
 instructions :: Text
 instructions =
   T.unlines
     [ "You answer questions about the user's own files using the numbered sources below."
-    , "Cite every claim that comes from a source with its number in square brackets, like [2]. End every sentence that uses a source with that source's number."
-    , "If the sources do not contain the answer, say so plainly and say what they do contain; do not guess."
-    , "Do not cite a number that is not in the list. Earlier turns of the conversation are context, not sources."
+    , "Reply with JSON: claims is a list of statements, each with the numbers of the sources it comes from; gaps says what the question asks that the sources do not contain, or is empty."
+    , "Split the answer into one claim per fact, so each claim lists the sources for that fact alone."
+    , "Only state what a source says. If the sources do not contain the answer, give no claims and say so in gaps; do not guess."
+    , "Earlier turns of the conversation are context, not sources."
     ]
 
 renderSource :: Int -> Hit -> Text
@@ -207,7 +314,9 @@ condense client c cap history q = do
       (_, rest) | not (T.null rest) -> T.drop 8 rest
       _ -> t
 
--- | Send one turn and stream the answer to the callback as it arrives.
+-- | Send one turn, constrained to 'answerSchema', and stream the raw reply
+-- to the callback as it arrives, for progress; the decoded 'Answer' is the
+-- result. hailo-ollama takes no schema and is refused.
 answerStream
   :: Client
   -> Chat
@@ -218,18 +327,21 @@ answerStream
   -> [Hit]
   -> (Text -> IO ())
   -> IO (Either Text Answer)
+answerStream _ c _ _ _ _ _ _
+  | c.engine == HailoOllama = pure (Left "hailo-ollama takes no schema, so it cannot give a cited answer; use an ollama or llama-server endpoint")
 answerStream client c cap maxWait history question hits onText = do
   let (msgs, chars) = buildMessages cap maxWait history question hits
+      ask = (plainAsk msgs) {schema = Just (answerSchema (length hits))}
   out <- newIORef ("" :: Text)
   counted <- newIORef Nothing
-  r <- streamChat client c cap (plainAsk msgs) (\t -> modifyIORef' out (<> t) >> onText t) (writeIORef counted . Just)
-  text <- readIORef out
+  r <- streamChat client c cap ask (\t -> modifyIORef' out (<> t) >> onText t) (writeIORef counted . Just)
+  raw <- readIORef out
   pt <- readIORef counted
   pure case r of
     Left e -> Left e
-    Right () ->
-      let (cited, invented) = judgeCitations (length hits) text
-       in Right Answer {text, sources = hits, cited, invented, promptTokens = pt, promptChars = chars}
+    Right () -> do
+      (claims, gaps, cited, invented) <- decodeAnswer (length hits) raw
+      Right Answer {text = renderAnswer claims gaps, claims, gaps, sources = hits, cited, invented, promptTokens = pt, promptChars = chars}
 
 -- | Which cited numbers were given and which were not.
 judgeCitations :: Int -> Text -> ([Int], [Int])
