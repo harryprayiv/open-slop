@@ -47,7 +47,7 @@ import OpenSlop.Http (Client, newClient)
 import OpenSlop.Measured (loadCatalogue, measuredPath, readMeasured)
 import OpenSlop.Rag.Embed (Embedder (..), embedder)
 import OpenSlop.Rag.Locality (Lan, onLan)
-import OpenSlop.Rag.Rerank (Reranker, rerank, reranker)
+import OpenSlop.Rag.Rerank (Reranker, rerank, reranker, withinMargin)
 import OpenSlop.Rag.Retrieve (Chat (..), Retrieval (..), relevanceMargin, retrieve)
 import OpenSlop.Rag.Split (SplitConfig (..), defaultSplit)
 import OpenSlop.Rag.Store
@@ -74,13 +74,14 @@ data Talk = Talk
   , depth :: Int
   , sources :: Int
   , rerankDepth :: Int
+  , rerankMargin :: Double
   , under :: [FilePath]
   }
 
 data Command
   = Init
   | Ingest IngestOpts
-  | Search Text Int Int Int [FilePath]
+  | Search Text Int Int Int Double [FilePath]
   | Ask Text Talk
   | ChatCmd (Maybe Text) Talk
   | Sessions
@@ -113,7 +114,11 @@ talkP =
     <*> option auto (long "depth" <> value 40 <> showDefault <> help "candidates from each half of the search")
     <*> option auto (long "sources" <> value 6 <> showDefault <> help "the most sources one answer is given; a small model answers worse the more it is given")
     <*> rerankDepthP
+    <*> rerankMarginP
     <*> underP
+
+rerankMarginP :: Parser Double
+rerankMarginP = option auto (long "rerank-margin" <> value 2.0 <> showDefault <> help "drop reranked candidates scoring more than this below the best")
 
 rerankDepthP :: Parser Int
 rerankDepthP = option auto (long "rerank-depth" <> value 20 <> showDefault <> help "candidates sent to the reranker; its time grows with this")
@@ -146,6 +151,7 @@ commandP =
         <*> option auto (long "depth" <> value 40 <> showDefault <> help "candidates from each half of the search")
         <*> option auto (long "limit" <> value 8 <> showDefault <> help "hits shown")
         <*> rerankDepthP
+        <*> rerankMarginP
         <*> underP
     pruneP =
       (PruneModel . T.pack <$> strOption (long "model" <> metavar "NAME"))
@@ -194,7 +200,7 @@ main = do
       client <- newClient
       e <- embedderFor g
       forM_ o.roots (ingestRoot client conn e o)
-    Search q d l rd scope -> do
+    Search q d l rd margin scope -> do
       client <- newClient
       e <- embedderFor g
       rr <- rerankerFor g
@@ -209,8 +215,21 @@ main = do
                 Left err -> die' err
                 Right scored -> do
                   say ("reranked the best " <> T.pack (show (min rd (length found))) <> " of " <> T.pack (show (length found)) <> " found; shown in the reranker's order")
+                  let close = length (withinMargin margin scored)
                   forM_ (zip [1 :: Int ..] (take l scored)) \(n, (h, s)) ->
-                    TIO.putStrLn ("[" <> T.pack (show n) <> "] rerank " <> T.pack (showFFloat (Just 3) s "") <> "  " <> h.path <> ":" <> T.pack (show h.lineFrom) <> "-" <> T.pack (show h.lineTo))
+                    TIO.putStrLn
+                      ( "["
+                          <> T.pack (show n)
+                          <> "] rerank "
+                          <> T.pack (showFFloat (Just 3) s "")
+                          <> "  "
+                          <> h.path
+                          <> ":"
+                          <> T.pack (show h.lineFrom)
+                          <> "-"
+                          <> T.pack (show h.lineTo)
+                          <> (if n <= close then "" else "  (dropped by --rerank-margin)")
+                      )
                   TIO.putStrLn ""
                   say "the hybrid search's own order, for comparison:"
                   pure (take l found)
@@ -348,6 +367,7 @@ asking g conn t = do
       , sources = t.sources
       , rerankWith = rr
       , rerankDepth = t.rerankDepth
+      , rerankMargin = t.rerankMargin
       , maxWait = t.maxWait
       , scope = sc
       }

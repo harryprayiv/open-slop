@@ -23,6 +23,7 @@ module OpenSlop.Rag.Rerank
   ( Reranker (..)
   , reranker
   , rerank
+  , withinMargin
   , documentChars
   ) where
 
@@ -55,6 +56,18 @@ reranker server engine model = case engine of
 -- non-causal model must hold the question and the whole document at once.
 documentChars :: Int
 documentChars = 2400
+
+-- | The reranked hits scoring no more than the margin below the best, in
+-- order. bge-reranker's scores are logits, not probabilities: on
+-- 2026-10-16 the two chunks that answered a question about the binary cache
+-- scored -0.87 and -1.53, and the next, unrelated, -3.82. The four sent
+-- with them by --sources 6 alone could only mislead the model, and one did:
+-- it named oracle, whose chunk was sixth, as the machine. A margin is used
+-- rather than a fixed floor because the scale of the best score moves with
+-- the question; the gap between an answer and a non-answer is what stays.
+withinMargin :: Double -> [(a, Double)] -> [(a, Double)]
+withinMargin _ [] = []
+withinMargin margin scored@((_, best) : _) = takeWhile (\(_, s) -> s >= best - margin) scored
 
 data Scored = Scored Int Double
 

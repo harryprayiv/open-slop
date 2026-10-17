@@ -30,7 +30,7 @@ import Numeric (showFFloat)
 import OpenSlop.Capacity (Capacity (..), describeCapacity, learn)
 import OpenSlop.Http (Client)
 import OpenSlop.Rag.Embed (Embedder)
-import OpenSlop.Rag.Rerank (Reranker, rerank)
+import OpenSlop.Rag.Rerank (Reranker, rerank, withinMargin)
 import OpenSlop.Rag.Retrieve
 import OpenSlop.Rag.Store (Connection, Hit (..), addTurn, openSession, sessionTurns)
 import System.Directory (makeAbsolute)
@@ -49,6 +49,8 @@ data Asking = Asking
   -- ^ when set, the best 'rerankDepth' candidates are reordered by it and
   -- 'relevant' is not used
   , rerankDepth :: Int
+  , rerankMargin :: Double
+  -- ^ reranked candidates scoring more than this below the best are dropped
   , maxWait :: Maybe Double
   , scope :: IORef [Text]
   }
@@ -116,7 +118,8 @@ chosen a q hits = case a.rerankWith of
     case r of
       Left e -> pure (Left e)
       Right scored -> do
-        let kept = take a.sources scored
+        let close = withinMargin a.rerankMargin scored
+            kept = take a.sources close
         say
           ( "reranked the best "
               <> T.pack (show (length candidates))
@@ -124,7 +127,11 @@ chosen a q hits = case a.rerankWith of
               <> T.pack (show (length hits))
               <> " found in "
               <> T.pack (showFFloat (Just 1) (realToFrac (diffUTCTime t1 t0) :: Double) "")
-              <> " s, kept "
+              <> " s; "
+              <> T.pack (show (length close))
+              <> " within "
+              <> T.pack (showFFloat (Just 1) a.rerankMargin "")
+              <> " of the best (--rerank-margin), kept "
               <> T.pack (show (length kept))
               <> " (--sources "
               <> T.pack (show a.sources)
