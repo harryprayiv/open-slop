@@ -35,6 +35,11 @@
 -- limits the prompt further, by the measured prefill rate, when an answer
 -- is wanted within a given time on slow hardware.
 --
+-- --sources defaults to 4. On 2026-10-18 all 25 answering chunks of the
+-- evaluation sets were sent at 4 as at 6, and each source left out is up
+-- to 2400 characters less for oracle's CPU to read before it answers; the
+-- mean answer took 229 to 300 seconds at 6.
+--
 -- --rerank-depth defaults to 30. At 20, three of 25 answering chunks in
 -- the evaluation sets were found by the search at 25th to 29th and never
 -- scored; at 30 all three were kept and nothing else moved, for about 25
@@ -126,7 +131,7 @@ talkP =
     <*> optional (strOption (long "model" <> metavar "NAME" <> help "chat model (default $OPEN_SLOP_RAG_CHAT_MODEL)"))
     <*> optional (option auto (long "max-wait" <> metavar "SECS" <> help "keep the prompt small enough to be read within this time, at the measured prefill rate"))
     <*> option auto (long "depth" <> value 40 <> showDefault <> help "candidates from each half of the search")
-    <*> option auto (long "sources" <> value 6 <> showDefault <> help "the most sources one answer is given; a small model answers worse the more it is given")
+    <*> option auto (long "sources" <> value 4 <> showDefault <> help "the most sources one answer is given; a small model answers worse the more it is given")
     <*> rerankDepthP
     <*> rerankMarginP
     <*> switch (long "split" <> help "have the model split a question that may ask several things, and search each part on its own")
