@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               open-slop
-version:            0.1.0.0
+version:            0.1.1.0
 synopsis:           A Nix-configured local LLM machine: catalogue, engines, jobs, client, gateway, typed stages
 license:            AGPL-3.0-or-later
 author:             Harry Pray IV
