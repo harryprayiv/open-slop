@@ -58,6 +58,7 @@ module OpenSlop.Rag.Retrieve
   , condense
   , mayHaveParts
   , splitParts
+  , guessAnswer
   , answerStream
   , buildMessages
   , citedSources
@@ -259,6 +260,7 @@ instructions =
     , "Write each claim as a complete sentence in your own words that names what it is about, not a fragment copied from a source."
     , "Give one claim per fact, so each claim lists the sources for that fact alone. Read every source before deciding a part is not answered."
     , "Only state what a source says. If the sources do not answer a part, give it no claims and say what is missing in its gap; do not guess."
+    , "A source that is documentation (a .md, .txt, .org or .rst file, or a README) describes the code as it was when it was written and can be out of date. When it disagrees with a source that is code, the code is right."
     , "A source whose path ends in .chase is a summary of code: its signatures and types are exact, but its notes (lines starting with !, >, ? or %) were written by hand or by a model and can be out of date. When it disagrees with a source that is code, the code is right."
     , "Earlier turns of the conversation are context, not sources."
     ]
@@ -447,6 +449,43 @@ newtype Parts = Parts [Text]
 
 instance FromJSON Parts where
   parseJSON = withObject "parts" \o -> Parts <$> o .: "parts"
+
+-- | A few lines of what the answer might look like in the user's files,
+-- written by the chat model, for searching beside the question.
+--
+-- A question and the code that answers it often share neither words nor
+-- much meaning: "what is the default number of sources?" against
+-- `option auto (long "sources" <> value 6 ...)`. On 2026-10-17 the search
+-- placed that chunk 25th and the reranker never saw it, and it did not
+-- return "Cannot modify a refund transaction" in cheeblr within 80
+-- candidates for a question about modifying a refund. A guess in the shape
+-- of code carries the identifiers and literals the real chunk has, so
+-- searching for it finds chunks the question cannot. The guess is never
+-- shown to the model that answers and is never a source; it only widens
+-- the candidates the reranker scores against the question.
+guessAnswer :: Client -> Chat -> Capacity -> Text -> IO (Either Text Text)
+guessAnswer client c cap q = do
+  let msgs =
+        [ object
+            [ "role" .= ("system" :: Text)
+            , "content"
+                .= ( "The user is searching their own source code and configuration (Haskell, PureScript, Nix). "
+                       <> "Write a short excerpt, at most ten lines, of the code or configuration that would answer "
+                       <> "their question, as it might appear in their files: the identifiers, string literals and "
+                       <> "values it would contain. Write only the excerpt, with no explanation." ::
+                       Text
+                   )
+            ]
+        , object ["role" .= ("user" :: Text), "content" .= q]
+        ]
+  out <- newIORef ("" :: Text)
+  r <- streamChat client c cap (plainAsk msgs) {outputCap = Just 200} (\t -> modifyIORef' out (<> t)) (const (pure ()))
+  guess <- T.strip <$> readIORef out
+  pure case r of
+    Left e -> Left e
+    Right ()
+      | T.null guess -> Left "the model wrote no guess"
+      | otherwise -> Right guess
 
 -- | Send one turn, constrained to 'answerSchema', and stream the raw reply
 -- to the callback as it arrives, for progress; the decoded 'Answer' is the

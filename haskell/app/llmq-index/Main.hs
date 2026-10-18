@@ -34,6 +34,11 @@
 -- kept, then packed into that capacity. No answer length is fixed here. --max-wait
 -- limits the prompt further, by the measured prefill rate, when an answer
 -- is wanted within a given time on slow hardware.
+--
+-- --rerank-depth defaults to 30. At 20, three of 25 answering chunks in
+-- the evaluation sets were found by the search at 25th to 29th and never
+-- scored; at 30 all three were kept and nothing else moved, for about 25
+-- seconds more per question on oracle.
 module Main (main) where
 
 import Control.Exception (SomeException, try)
@@ -83,6 +88,7 @@ data Talk = Talk
   , rerankDepth :: Int
   , rerankMargin :: Double
   , split :: Bool
+  , guess :: Bool
   , under :: [FilePath]
   }
 
@@ -125,13 +131,14 @@ talkP =
     <*> rerankDepthP
     <*> rerankMarginP
     <*> switch (long "split" <> help "have the model split a question that may ask several things, and search each part on its own")
+    <*> switch (long "guess" <> help "also search for the model's guess at the answer's text, for questions phrased unlike the code that answers them")
     <*> underP
 
 rerankMarginP :: Parser Double
 rerankMarginP = option auto (long "rerank-margin" <> value 2.0 <> showDefault <> help "drop reranked candidates scoring more than this below the best")
 
 rerankDepthP :: Parser Int
-rerankDepthP = option auto (long "rerank-depth" <> value 20 <> showDefault <> help "candidates sent to the reranker; its time grows with this")
+rerankDepthP = option auto (long "rerank-depth" <> value 30 <> showDefault <> help "candidates sent to the reranker; its time grows with this")
 
 commandP :: Parser Command
 commandP =
@@ -389,6 +396,7 @@ asking g conn t = do
       , rerankDepth = t.rerankDepth
       , rerankMargin = t.rerankMargin
       , splitQuestions = t.split
+      , guessAnswers = t.guess
       , maxWait = t.maxWait
       , scope = sc
       }
