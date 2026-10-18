@@ -1,4 +1,7 @@
 {
+  "under": [
+    "~/ingest/neoblade-config"
+  ],
   "cases": [
     {
       "question": "Which machine holds the binary cache, and on what port?",

@@ -41,6 +41,20 @@
 -- (default 0). A case with expect [] and missing 1 asks something the
 -- index cannot answer at all.
 --
+-- A top-level "under" lists the paths the questions are about, as
+-- --under would, with a leading ~/ meaning the home directory:
+--
+--   { "under": ["~/ingest/neoblade-config"], "cases": [ ... ] }
+--
+-- The search is then limited to them unless --under is given, which wins.
+-- A set of questions about one repository is measured within it, because
+-- the index holds several: on 2026-10-18 the neoblade-config set lost its
+-- binary cache chunks to open-slop's own test of the answer schema, whose
+-- made-up reply ("Which machine? Blade. What port? 8080.") answers the
+-- same question, and to a comment in open-slop quoting one of the set's
+-- questions word for word. Those chunks answer the question as asked of
+-- the whole index; they are not what the set measures.
+--
 -- ============================================================================
 -- WHAT IS REPORTED
 -- ============================================================================
@@ -84,11 +98,14 @@ import Data.Maybe (catMaybes, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Data.IORef (readIORef, writeIORef)
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import Converse (Asking (..), Selection (..), answerWith, select)
 import Numeric (showFFloat)
 import OpenSlop.Rag.Retrieve (Answer (..), Part (..))
 import OpenSlop.Rag.Store (Hit (..), chunksMatching)
+import System.Directory (getHomeDirectory, makeAbsolute)
+import System.FilePath ((</>))
 import System.IO (stderr)
 
 data EvalOpts = EvalOpts
@@ -124,10 +141,10 @@ instance FromJSON Case where
   parseJSON = withObject "case" \o ->
     Case <$> o .: "question" <*> o .:? "expect" .!= [] <*> o .:? "missing" .!= 0
 
-newtype Cases = Cases [Case]
+data Cases = Cases [Text] [Case]
 
 instance FromJSON Cases where
-  parseJSON = withObject "evaluation" \o -> Cases <$> o .: "cases"
+  parseJSON = withObject "evaluation" \o -> Cases <$> o .:? "under" .!= [] <*> o .: "cases"
 
 -- | What happened to one expected chunk.
 data Fate = Fate
@@ -184,7 +201,14 @@ runEval a o = do
   raw <- BS.readFile o.file
   case Aeson.eitherDecodeStrict raw of
     Left err -> say ("cannot read " <> T.pack o.file <> ": " <> T.pack err) >> pure False
-    Right (Cases cs) -> do
+    Right (Cases fileScope cs) -> do
+      given <- readIORef a.scope
+      when (null given && not (null fileScope)) do
+        home <- getHomeDirectory
+        let expand t = maybe (T.unpack t) ((home </>) . T.unpack) (T.stripPrefix "~/" t)
+        sc <- traverse (fmap T.pack . makeAbsolute . expand) fileScope
+        writeIORef a.scope sc
+        say ("searching under " <> T.intercalate ", " sc <> ", as the file says")
       results <- forM (zip [1 :: Int ..] cs) \(n, c) -> do
         TIO.putStrLn ("[" <> tshow n <> "/" <> tshow (length cs) <> "] " <> c.question)
         r <- one a o c
