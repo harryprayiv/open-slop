@@ -270,10 +270,26 @@ data Hit = Hit
 -- @limit@ returned. A chunk found both ways ranks above one found either
 -- way at the same position.
 --
--- The word half matches ANY of the question's stemmed words, ranked by
--- cover density, not all of them: a question is phrased in words the
--- answer does not use ("what port does it use"), and requiring every word
--- would leave this half empty for most questions.
+-- The word half matches ANY of the question's stemmed words, not all of
+-- them: a question is phrased in words the answer does not use ("what port
+-- does it use"), and requiring every word would leave this half empty for
+-- most questions. A chunk scores the sum, over the distinct question words
+-- it contains, of ln(1 + N / (1 + n)), where N is the number of chunks in
+-- the index and n the number containing that word, so a rare word counts
+-- for much more than a common one and a chunk with several of the rare
+-- words ranks first. How often a word repeats within the chunk does not
+-- count.
+--
+-- Until 2026-10-18 this half ranked by ts_rank_cd over the same words,
+-- which knows nothing of rarity. In cheeblr, "What error does the backend
+-- return when a request tries to modify a refund transaction?" ranked
+-- chunks dense with "transaction" and "error", which thousands of chunks
+-- have, above the one chunk with "modify", "refund" and "transaction"
+-- together, and the search never returned it.
+--
+-- The counts are taken over the whole index, not the scope, so a word's
+-- weight does not change with --under. Each is one lookup in the GIN
+-- index on tsv, one per distinct word of the question.
 --
 -- A non-empty scope keeps only documents whose path starts with one of the
 -- given prefixes, in both halves, so the candidates are drawn from the
@@ -299,14 +315,19 @@ search conn model qvec qtext scope depth limit = do
           <> " ORDER BY "
           <> dist
           <> " LIMIT ?),\
+             \ terms AS (\
+             \  SELECT DISTINCT ('''' || replace(t, '''', '''''') || '''')::tsquery AS q\
+             \  FROM unnest(tsvector_to_array(to_tsvector('english', ?))) t),\
+             \ rarity AS (\
+             \  SELECT q, ln(1 + (SELECT count(*) FROM rag_chunks)::float8\
+             \   / (1 + (SELECT count(*) FROM rag_chunks n WHERE n.tsv @@ terms.q))) AS w FROM terms),\
              \ k AS (\
-             \  SELECT c.id, row_number() OVER (ORDER BY ts_rank_cd(c.tsv, w.q) DESC) AS r\
-             \  FROM (SELECT replace(plainto_tsquery('english', ?)::text, '&', '|')::tsquery AS q) w\
-             \  CROSS JOIN rag_chunks c\
+             \  SELECT c.id, row_number() OVER (ORDER BY sum(i.w) DESC, c.id) AS r\
+             \  FROM rarity i JOIN rag_chunks c ON c.tsv @@ i.q\
              \  JOIN rag_documents kd ON kd.id = c.document_id\
-             \  WHERE c.tsv @@ w.q"
+             \  WHERE true"
           <> scoped "kd"
-          <> " ORDER BY ts_rank_cd(c.tsv, w.q) DESC LIMIT ?),\
+          <> " GROUP BY c.id ORDER BY sum(i.w) DESC, c.id LIMIT ?),\
              \ f AS (\
              \  SELECT id, sum(1.0 / (60 + r))::float8 AS score,\
              \   bool_or(src = 'v') AS via_v, bool_or(src = 'k') AS via_k\
