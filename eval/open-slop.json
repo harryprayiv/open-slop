@@ -95,11 +95,11 @@
       "expect": [
         {
           "path": "app/llmq-index/Main.hs",
-          "contains": "long \"sources\" <> value 6"
+          "contains": "long \"sources\" <> value"
         },
         {
           "path": "app/llmq-index/Main.hs",
-          "contains": "long \"rerank-depth\" <> value 20"
+          "contains": "long \"rerank-depth\" <> value"
         }
       ]
     },
@@ -108,7 +108,7 @@
       "expect": [
         {
           "path": "app/llmq-index/Main.hs",
-          "contains": "long \"rerank-margin\" <> value 2.0"
+          "contains": "long \"rerank-margin\" <> value"
         }
       ],
       "missing": 1

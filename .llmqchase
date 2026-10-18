@@ -1,0 +1,6 @@
+{
+  "runs": [
+    { "src": "haskell/src", "tests": ["haskell/test"] },
+    { "src": "haskell/app", "tests": [] }
+  ]
+}

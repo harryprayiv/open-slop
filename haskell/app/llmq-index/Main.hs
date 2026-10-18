@@ -88,7 +88,6 @@ data Talk = Talk
   , rerankDepth :: Int
   , rerankMargin :: Double
   , split :: Bool
-  , guess :: Bool
   , under :: [FilePath]
   }
 
@@ -131,7 +130,6 @@ talkP =
     <*> rerankDepthP
     <*> rerankMarginP
     <*> switch (long "split" <> help "have the model split a question that may ask several things, and search each part on its own")
-    <*> switch (long "guess" <> help "also search for the model's guess at the answer's text, for questions phrased unlike the code that answers them")
     <*> underP
 
 rerankMarginP :: Parser Double
@@ -396,7 +394,6 @@ asking g conn t = do
       , rerankDepth = t.rerankDepth
       , rerankMargin = t.rerankMargin
       , splitQuestions = t.split
-      , guessAnswers = t.guess
       , maxWait = t.maxWait
       , scope = sc
       }

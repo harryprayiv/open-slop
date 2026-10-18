@@ -6,7 +6,7 @@
 # llmq reads, and wraps the binary so $OPEN_SLOP_CATALOGUE points at it and
 # $OPEN_SLOP_PROMPTS at the shipped prompts/ directory. llmq-index also gets
 # pandoc and pdftotext by store path and its rag defaults, the reranker
-# among them; llmq-agent gets git, its model defaults and, when given,
+# among them, and chase by store path when `chase` is given; llmq-agent gets git, its model defaults and, when given,
 # tricorder by store path. Nothing in open-slop knows an address; every one
 # comes from `endpoints` here.
 #
@@ -63,6 +63,7 @@ let
         OPEN_SLOP_AGENT_CHAT_AT = cfg.agent.chatAt;
         OPEN_SLOP_AGENT_MODEL = cfg.agent.model;
         TRICORDER = if cfg.agent.tricorder == null then null else lib.getExe' cfg.agent.tricorder "tricorder";
+        OPEN_SLOP_CHASE = if cfg.chase == null then null else lib.getExe' cfg.chase "chase";
       }
     )
   );
@@ -117,6 +118,17 @@ in
       );
       default = { };
       description = "Inference rows this machine may talk to, keyed by row name.";
+    };
+
+    # chase is taken from its own flake, as tricorder is, and only where
+    # llmq-index ingests: building it builds Grace and ghc-lib-parser, which
+    # no Pi row should have to. Without it, a root's .llmqchase finds chase on PATH or
+    # makes no bundles, and says so.
+    chase = lib.mkOption {
+      type = types.nullOr types.package;
+      default = null;
+      example = lib.literalExpression "inputs.chase.packages.\${pkgs.system}.chase";
+      description = "chase, which llmq-index ingest runs over a root that has a .llmqchase file, so the index holds bundles made from the same code. Unset means whatever chase is on PATH.";
     };
 
     keyFile = lib.mkOption {

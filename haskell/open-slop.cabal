@@ -173,6 +173,7 @@ executable llmq-index
   hs-source-dirs:  app/llmq-index
   main-is:         Main.hs
   other-modules:
+    Bundles
     Converse
     Eval
     Extract
@@ -190,6 +191,7 @@ executable llmq-index
     directory,
     filepath,
     optparse-applicative,
+    temporary,
     text,
     time,
     typed-process

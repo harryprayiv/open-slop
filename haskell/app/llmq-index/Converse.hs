@@ -64,8 +64,6 @@ data Asking = Asking
   -- are dropped
   , splitQuestions :: Bool
   -- ^ split a question that may ask several things and search each part
-  , guessAnswers :: Bool
-  -- ^ also search for a guess at the answer's text; see 'guessAnswer'
   , maxWait :: Maybe Double
   , scope :: IORef [Text]
   }
@@ -108,6 +106,14 @@ data Selection = Selection
 -- answering chunks as searching whole, cost a model call per compound
 -- question, and sent more sources, because each part that the files cannot
 -- answer still contributes its own best candidates.
+--
+-- Searching beside the question for the chat model's guess at the
+-- answer's text was tried the same day and removed. The model has never
+-- seen these repositories, so its guesses were generic code (a
+-- `reciprocalRankFusion = 0.5`, JavaScript for a PureScript frontend),
+-- each took 7 to 66 seconds on oracle, neither of the two chunks the
+-- search misses was found, and interleaving the guess's hits pushed two
+-- answers that ranked within --rerank-depth out past it.
 select :: Asking -> [(Text, Text)] -> Text -> IO (Either Text Selection)
 select a history question = do
   cap <- readIORef a.capacity
@@ -156,16 +162,9 @@ select a history question = do
 
 -- | One part's hits from the search, and its candidates best first, scored
 -- relative to the best.
---
--- With --guess, the part is searched twice, as asked and as the model's
--- guess at the answer's text, and the two result lists are interleaved,
--- first of each, then second of each, a chunk both found kept at its
--- earlier place. The reranker then scores the interleaved candidates
--- against the part as asked, never against the guess, so a guess that is
--- wrong can bring in a chunk but cannot make it rank.
 scorePart :: Asking -> [Text] -> Int -> Text -> IO (Either Text ([Hit], [(Hit, Double)]))
 scorePart a sc depthEach part =
-  searchFor part >>= \case
+  retrieve a.client a.conn a.embedWith Retrieval {depth = a.depth, limit = 2 * a.depth, scope = sc} part >>= \case
     Left e -> pure (Left e)
     Right [] -> pure (Right ([], []))
     Right hits -> case a.rerankWith of
@@ -192,32 +191,6 @@ scorePart a sc depthEach part =
               )
             pure (Right (hits, relative scored))
   where
-    searchFor p = do
-      asked <- retrieve a.client a.conn a.embedWith Retrieval {depth = a.depth, limit = 2 * a.depth, scope = sc} p
-      if not a.guessAnswers
-        then pure asked
-        else do
-          cap <- readIORef a.capacity
-          t0 <- getCurrentTime
-          g <- guessAnswer a.client a.chatTo cap p
-          t1 <- getCurrentTime
-          case g of
-            Left e -> say ("no guess (" <> e <> "); searching the question alone") >> pure asked
-            Right guess -> do
-              say ("guessed in " <> T.pack (showFFloat (Just 1) (realToFrac (diffUTCTime t1 t0) :: Double) "") <> " s: " <> T.take 120 (T.unwords (T.words guess)))
-              fromGuess <- retrieve a.client a.conn a.embedWith Retrieval {depth = a.depth, limit = 2 * a.depth, scope = sc} guess
-              pure (interleave <$> asked <*> fromGuess)
-    interleave xs ys = dedupe (concat (zipLong xs ys))
-    zipLong (x : xs) (y : ys) = [x, y] : zipLong xs ys
-    zipLong xs [] = map pure xs
-    zipLong [] ys = map pure ys
-    dedupe = go Map.empty
-      where
-        go _ [] = []
-        go seen (h : hs)
-          | Map.member (key h) seen = go seen hs
-          | otherwise = h : go (Map.insert (key h) () seen) hs
-        key h = (h.path, h.lineFrom, h.lineTo)
     relative = \case
       [] -> []
       xs@((_, best) : _) -> [(h, s - best) | (h, s) <- xs]
