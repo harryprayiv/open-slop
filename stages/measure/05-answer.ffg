@@ -1,0 +1,37 @@
+# llmq-index's answer, written as a Grace type: parts, each with what it
+# asks, claims with the sources they rest on, and what the sources lack.
+#
+# What the Grace type cannot say, and llmq-index's own schema does: that a
+# part has at least one claim or a non-empty gap, and that a source number
+# is one of the sources sent. Grace's types have no minimum length and no
+# range of naturals, so the grammar here allows an empty, unexplained part
+# and a citation to source 9 of 2. Comparing this program's answers with
+# llmq-index's on the same sources is how to see whether that matters to
+# the model in practice.
+let key = env:OPEN_SLOP_KEY : Key
+
+let model = env:OPEN_SLOP_MODEL : Text
+
+in  prompt
+      { key
+      , model
+      , text: "
+          Answer the question from the numbered sources. One part for each thing the question asks. Each claim cites the sources it comes from. If the sources do not answer a part, give it no claims and say what is missing in its gap.
+
+          [1] haskell/src/OpenSlop/Rag/Rerank.hs lines 64-70
+          documentChars :: Int
+          documentChars = 2400
+
+          [2] haskell/app/llmq-index/Main.hs lines 120-126
+          option auto (long \"rerank-depth\" <> value 30 <> showDefault <> help \"candidates sent to the reranker\")
+
+          Question: What is the most characters of one chunk sent to the reranker, and how many candidates are sent to it by default, and what colour is the reranker's logo?
+          "
+      }
+      : { parts:
+            List
+              { ask: Text
+              , claims: List { claim: Text, sources: List Natural }
+              , gap: Text
+              }
+        }

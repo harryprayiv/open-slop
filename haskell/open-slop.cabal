@@ -123,6 +123,7 @@ executable open-slop-gateway
   build-depends:
     open-slop,
     aeson,
+    bytestring,
     optparse-applicative,
     text,
     time,
@@ -249,6 +250,7 @@ executable llmq-grace
   main-is:         Main.hs
   other-modules:
     AgentStep
+    Measure
     Stage
   ghc-options:     -threaded -rtsopts
   if !flag(grace)
@@ -261,6 +263,7 @@ executable llmq-grace
     filepath,
     grace,
     optparse-applicative,
+    scientific,
     text,
     time,
     unix

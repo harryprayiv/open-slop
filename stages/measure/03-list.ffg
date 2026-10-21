@@ -1,0 +1,8 @@
+# A type that is not a record. Grace wraps it as { response: T } in the
+# schema and unwraps the answer; this checks that path on the real model.
+let key = env:OPEN_SLOP_KEY : Key
+
+let model = env:OPEN_SLOP_MODEL : Text
+
+in  prompt{ key, model, text: "List three primary colours." }
+      : List Text

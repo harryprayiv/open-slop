@@ -1,0 +1,8 @@
+# The same question with no schema: Text sends none. Against 01-record it
+# shows what the grammar costs, or saves, on the same model.
+let key = env:OPEN_SLOP_KEY : Key
+
+let model = env:OPEN_SLOP_MODEL : Text
+
+in  prompt{ key, model, text: "Name one colour and one whole number, in one short sentence." }
+      : Text

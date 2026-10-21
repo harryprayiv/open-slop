@@ -1,0 +1,20 @@
+# A closed choice, the shape of a typed tool call and of a triage
+# judgement: a union whose alternatives are the only answers the grammar
+# allows. This is the form llmq-agent's decisions take and the form an NPU
+# triage stage would take, measured here on its own.
+let key = env:OPEN_SLOP_KEY : Key
+
+let model = env:OPEN_SLOP_MODEL : Text
+
+in  prompt
+      { key
+      , model
+      , text: "
+          Does this Haskell function need a note beyond its type signature to be used correctly?
+
+            lookupDefault :: Ord k => v -> k -> Map k v -> v
+
+          Answer NeedsNote with the reason, NoNote, or Unsure.
+          "
+      }
+      : < NeedsNote: { reason: Text } | NoNote: { } | Unsure: { } >

@@ -14,6 +14,16 @@
 -- seconds: a request names a model by what the servers report, and asking
 -- them on every request would add a round trip to each backend per call.
 --
+-- With a record sink (open-slop-gateway's --record), every chat request
+-- is also written as one JSON object: who asked, for which model, whether
+-- a schema constrained it, how many messages and bytes it carried, whether
+-- it was a repair (a message labelled Error, which is how Grace sends a
+-- failed attempt back), the prompt and completion tokens, the seconds, and
+-- how it ended. That is what llmq-grace --measure joins its runs against,
+-- because a Grace program's calls are not visible from outside it any
+-- other way: Grace does not return the usage, and an import prompt makes
+-- as many calls as its repairs need.
+--
 -- Nothing here orders or queues requests. Each backend already serves one
 -- request at a time (ollama with OLLAMA_NUM_PARALLEL=1, llama-server with
 -- one slot) and queues the rest itself; a second queue in front of it would
@@ -36,7 +46,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Encoding.Error qualified as TE
-import Data.Time.Clock.POSIX (getPOSIXTime)
+import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
 import Network.HTTP.Types (Header, Status, hContentType, mkStatus, status200)
 import Network.Wai
 import OpenSlop.Catalogue
@@ -61,14 +71,16 @@ data Env = Env
   -- ^ called before a generation starts; warp's pauseTimeout, so a long
   -- prefill does not trip the server's idle timeout
   , maxBodyBytes :: Int
+  , record :: Value -> IO ()
+  -- ^ one object per chat request; see the module header
   }
 
-newEnv :: Catalogue -> Keys -> (Text -> IO ()) -> (Request -> IO ()) -> IO Env
-newEnv catalogue keys logLine pause = do
+newEnv :: Catalogue -> Keys -> (Text -> IO ()) -> (Request -> IO ()) -> (Value -> IO ()) -> IO Env
+newEnv catalogue keys logLine pause record = do
   client <- newClient
   listing <- newIORef Nothing
   counter <- newIORef 0
-  pure Env {catalogue, keys, client, listing, counter, logLine, pause, maxBodyBytes = 8 * 1024 * 1024}
+  pure Env {catalogue, keys, client, listing, counter, logLine, pause, maxBodyBytes = 8 * 1024 * 1024, record}
 
 app :: Env -> Application
 app env req respond =
@@ -134,29 +146,37 @@ modelList env = do
 
 chat :: Env -> Text -> Request -> IO Response
 chat env who req = do
+  started <- getPOSIXTime
   raw <- strictRequestBody req
   if BL.length raw > fromIntegral env.maxBodyBytes
     then pure (errorResponse (ApiError 413 "invalid_request_error" (Just "request_too_large") ("the body is over " <> tshow env.maxBodyBytes <> " bytes")))
     else case Aeson.eitherDecode raw of
       -- aeson prefixes "Error in $: "; the JSON path after "in" is kept
       -- when it points inside the body, since it names the bad field.
-      Left e -> reject (invalidRequest Nothing (T.replace "Error in $: " "" (T.pack e)))
+      Left e -> reject started Nothing Nothing (invalidRequest Nothing (T.replace "Error in $: " "" (T.pack e)))
       Right (r :: ChatRequest) -> do
         l <- currentListing env
         case resolveTarget env.catalogue l r.model of
-          Left why -> reject (ApiError 404 "invalid_request_error" (Just "model_not_found") why)
+          Left why -> reject started (Just r) Nothing (ApiError 404 "invalid_request_error" (Just "model_not_found") why)
           Right t -> case plan t r of
-            Left e -> reject e
-            Right c -> run t r c
+            Left e -> reject started (Just r) (Just t) e
+            Right c -> run started t r c
   where
-    reject e = do
+    reject started r t e = do
       env.logLine (who <> " refused: " <> e.message)
+      ended <- getPOSIXTime
+      env.record (requestRecord who started ended r t Nothing (Left e))
       pure (errorResponse e)
-    run t r c = do
+    run started t r c = do
       env.pause req
       t0 <- getPOSIXTime
       res <- postJsonWithin Nothing env.client NoAuth t.endpoint.url c.path c.body
       t1 <- getPOSIXTime
+      let note outcome = env.record (requestRecord who started t1 (Just r) (Just t) (Just (t1 - t0)) outcome)
+          failed wall e = do
+            env.logLine (who <> " " <> targetId t <> " failed after " <> tshow wall <> "s: " <> e.message)
+            note (Left e)
+            pure (errorResponse e)
       let wall = floor (t1 - t0) :: Int
           inputBytes = sum [BC.length (TE.encodeUtf8 m.content) | m <- r.messages]
           constrained = case r.responseFormat of
@@ -214,11 +234,55 @@ chat env who req = do
                     <> maybe "" (\g -> ", " <> tshow g <> " tok/s") st.genTokPerSec
                     <> (if null st.warnings then "" else "; " <> T.intercalate "; " st.warnings)
                 )
+              note (Right (promptTokens, estimated, completionTokens, reply.finish))
               pure (responseLBS status200 headers (Aeson.encode resp))
-      where
-        failed wall e = do
-          env.logLine (who <> " " <> targetId t <> " failed after " <> tshow wall <> "s: " <> e.message)
-          pure (errorResponse e)
+
+-- | One request as the record sink writes it. Times are seconds since the
+-- epoch, with fractions. A repair is a request with a message whose first line is the
+-- label Error, which is how Grace returns a failed attempt and the
+-- complaint about it; the gateway writes a message's name at the top of
+-- its content, so the label is there whichever way the client sent it.
+requestRecord
+  :: Text
+  -> POSIXTime
+  -> POSIXTime
+  -> Maybe ChatRequest
+  -> Maybe Target
+  -> Maybe POSIXTime
+  -> Either ApiError (Int, Bool, Int, FinishReason)
+  -> Value
+requestRecord who started ended r t backendSeconds outcome =
+  object
+    ( [ "at" .= (realToFrac started :: Double)
+      , "seconds" .= (realToFrac (ended - started) :: Double)
+      , "client" .= who
+      ]
+        <> maybe
+          []
+          ( \x ->
+              [ "model" .= x.model
+              , "schema" .= case x.responseFormat of
+                  Just FormatJsonSchema {} -> True
+                  Just FormatJsonObject -> True
+                  _ -> False
+              , "messages" .= length x.messages
+              , "inputBytes" .= sum [BC.length (TE.encodeUtf8 m.content) | m <- x.messages]
+              , "repair" .= any (\m -> "Error:" `T.isPrefixOf` T.stripStart m.content) x.messages
+              ]
+          )
+          r
+        <> maybe [] (\x -> ["target" .= targetId x, "engine" .= engineName x.backend.engine]) t
+        <> maybe [] (\b -> ["backendSeconds" .= (realToFrac b :: Double)]) backendSeconds
+        <> case outcome of
+          Left e -> ["outcome" .= fromMaybe e.kind e.code, "message" .= e.message]
+          Right (p, est, c, fin) ->
+            [ "outcome" .= ("ok" :: Text)
+            , "promptTokens" .= p
+            , "promptEstimated" .= est
+            , "completionTokens" .= c
+            , "finish" .= tshow fin
+            ]
+    )
 
 -- | The budget with the output cap this request actually sent, so the
 -- verdict's warnings are about this request and not the catalogue default.

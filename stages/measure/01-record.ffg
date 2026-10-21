@@ -1,0 +1,10 @@
+# The smallest typed call: a record of two fields, decoded under the schema
+# Grace derives from the annotation. Its time is the floor every other
+# typed call stands on: one request, a few tokens out, and Grace's own work
+# around it.
+let key = env:OPEN_SLOP_KEY : Key
+
+let model = env:OPEN_SLOP_MODEL : Text
+
+in  prompt{ key, model, text: "Name one colour and one whole number." }
+      : { colour: Text, number: Natural }

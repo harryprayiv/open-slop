@@ -1,0 +1,12 @@
+# import prompt for a function between records, applied to one value. The
+# generated program may itself call prompt, so a run can make more calls
+# than its repairs explain; the calls column counts all of them.
+let key = env:OPEN_SLOP_KEY : Key
+
+let model = env:OPEN_SLOP_MODEL : Text
+
+let classify =
+      import prompt{ key, model }
+        : { description: Text } -> { finance: Bool, rationale: Text }
+
+in  classify { description: "Reconcile the monthly ledger against bank statements and prepare variance reports." }

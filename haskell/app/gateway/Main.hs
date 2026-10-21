@@ -9,9 +9,16 @@
 -- gateway binds loopback only, unless --plaintext-lan says otherwise: a
 -- bearer key sent in clear on a LAN is readable by anything on it, and that
 -- is a choice made once, by name, on the command line.
+--
+-- --record FILE appends one JSON object per chat request to FILE: who,
+-- which model, schema or not, messages, bytes, whether it was a repair,
+-- tokens, seconds and outcome. llmq-grace --measure reads it to attribute
+-- a Grace program's calls to the program; see OpenSlop.Gateway.Server.
 module Main (main) where
 
-import Data.Aeson (eitherDecodeFileStrict)
+import Control.Concurrent.MVar (newMVar, withMVar)
+import Data.Aeson (eitherDecodeFileStrict, encode)
+import Data.ByteString.Lazy.Char8 qualified as BLC
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -35,6 +42,7 @@ data Opts = Opts
   , tlsCert :: Maybe FilePath
   , tlsKey :: Maybe FilePath
   , plaintextLan :: Bool
+  , recordFile :: Maybe FilePath
   }
 
 optsP :: Parser Opts
@@ -47,6 +55,7 @@ optsP =
     <*> optional (strOption (long "tls-cert" <> metavar "FILE"))
     <*> optional (strOption (long "tls-key" <> metavar "FILE"))
     <*> switch (long "plaintext-lan" <> help "allow a non-loopback bind without TLS; keys then cross the network in clear")
+    <*> optional (strOption (long "record" <> metavar "FILE" <> help "append one JSON line per chat request, for llmq-grace --measure"))
 
 main :: IO ()
 main = do
@@ -62,7 +71,15 @@ main = do
       | loopback || o.plaintextLan -> pure Nothing
       | otherwise -> dieWith ("refusing to bind " <> T.pack o.host <> " without TLS: bearer keys would cross the network in clear. Pass --tls-cert and --tls-key, or --plaintext-lan to accept that.")
     _ -> dieWith "--tls-cert and --tls-key go together"
-  env <- newEnv cat keys logLine Warp.pauseTimeout
+  record <- case o.recordFile of
+    Nothing -> pure (const (pure ()))
+    Just path -> do
+      h <- openFile path AppendMode
+      hSetBuffering h LineBuffering
+      lock <- newMVar ()
+      logLine ("recording every chat request to " <> T.pack path)
+      pure \v -> withMVar lock \() -> BLC.hPutStrLn h (encode v)
+  env <- newEnv cat keys logLine Warp.pauseTimeout record
   logLine
     ( "serving " <> T.intercalate ", " (map endpointId cat.endpoints) <> " for " <> T.pack (show (keyCount keys)) <> " clients on "
         <> T.pack o.host <> ":" <> T.pack (show o.port) <> maybe " without TLS" (const " with TLS") tls

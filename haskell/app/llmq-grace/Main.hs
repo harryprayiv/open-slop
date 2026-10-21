@@ -26,9 +26,14 @@
 -- step (stages/agent-step.ffg) against the Haskell Decision type of
 -- llmq-agent, and with --task sends one step through the gateway; see
 -- AgentStep.
+--
+-- With --measure DIR it runs every Grace program in DIR against the
+-- gateway, several times each, and reports what each cost and whether it
+-- worked; see Measure.
 module Main (main) where
 
 import AgentStep (agentP, runAgentStep)
+import Measure (measureP, runMeasure)
 import Control.Exception (SomeException, displayException, try)
 import Control.Monad (forM, forM_, unless, when)
 import Data.Aeson (encode)
@@ -52,6 +57,7 @@ import System.Directory (doesFileExist, getHomeDirectory, removePathForcibly)
 import System.Environment (lookupEnv, setEnv)
 import System.Exit
 import System.FilePath ((</>))
+import GHC.IO.Encoding (setLocaleEncoding)
 import System.IO
 import System.Posix.Process (exitImmediately)
 import System.Posix.Signals (Handler (Catch), installHandler, sigINT, sigTERM)
@@ -90,6 +96,12 @@ optsP =
 
 main :: IO ()
 main = do
+  -- Grace reads its own data files (the grammar and inference prompts that
+  -- import prompt sends) in the locale's encoding. Under a C locale that
+  -- fails on the first non-ASCII byte, and Grace reports it from inside
+  -- its HTTP layer as a ConnectionError, which names the wrong cause.
+  -- Found 2026-10-19 running --measure; the files are UTF-8, so say so.
+  setLocaleEncoding utf8
   hSetEncoding stdout utf8
   hSetEncoding stderr utf8
   let onSignal = Catch do
@@ -101,11 +113,12 @@ main = do
   mode <-
     execParser
       ( info
-          (((Left <$> agentP) <|> (Right <$> optsP)) <**> helper)
-          (fullDesc <> progDesc "run a Grace stage over the parts of a job, keeping typed results; or, with --agent-stage, check an agent step and try it")
+          (((Left . Left <$> agentP) <|> (Left . Right <$> measureP) <|> (Right <$> optsP)) <**> helper)
+          (fullDesc <> progDesc "run a Grace stage over the parts of a job, keeping typed results; with --agent-stage, check an agent step and try it; with --measure, run a set of Grace programs and report what each cost")
       )
   o <- case mode of
-    Left a -> runAgentStep a >> exitSuccess
+    Left (Left a) -> runAgentStep a >> exitSuccess
+    Left (Right m) -> runMeasure m >> exitSuccess
     Right x -> pure x
 
   forM_ o.gateway \url -> setEnv "OPENAI_BASE_URL" (T.unpack url)

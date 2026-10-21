@@ -1,0 +1,12 @@
+# import prompt: the model writes a Grace program of the type asked for,
+# Grace type-checks it, and a program that does not check is sent back with
+# the error until it does or the attempts run out. Grace puts its grammar
+# and inference rules in front of the model for this, about 8,000 tokens,
+# so the cold run is mostly reading that preamble. Against the warm runs on
+# llama-server it shows what the prompt cache is worth for code generation,
+# and the repairs column shows how often the 7B writes Grace that checks.
+let key = env:OPEN_SLOP_KEY : Key
+
+let model = env:OPEN_SLOP_MODEL : Text
+
+in  import prompt{ key, model, text: "Uppercase the input" } "abc" : Text

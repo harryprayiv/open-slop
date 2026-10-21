@@ -1,0 +1,42 @@
+# A documentation-sized typed value: several long text fields about real
+# source. This is the open question from docs/HANDOFF.md: how many output
+# tokens a typed value of this size needs on the 7B, against the cap the
+# catalogue reserves, and whether it stops at the cap with the JSON
+# unfinished (the gateway refuses that as length_before_schema_complete).
+let key = env:OPEN_SLOP_KEY : Key
+
+let model = env:OPEN_SLOP_MODEL : Text
+
+in  prompt
+      { key
+      , model
+      , text: "
+          Document this Haskell module for a reference manual: its purpose, its interface, how it behaves, and anything a caller must know.
+
+          module OpenSlop.Rag.Locality (Lan, lanEndpoint, lanUrl, onLan, hostOf, privateHost) where
+
+          -- | An endpoint whose host was checked to be on the LAN. No constructor is exported.
+          newtype Lan = Lan Endpoint
+
+          -- | Accept the endpoint when its host is loopback, a private IPv4 range
+          -- (10/8, 172.16/12, 192.168/16, 169.254/16), a unique-local or link-local
+          -- IPv6 address, a single-label name, or a name ending in .lan, .local,
+          -- .internal or .home.arpa. Anything else is refused with the reason.
+          onLan :: Endpoint -> Either Text Lan
+
+          lanEndpoint :: Lan -> Endpoint
+          lanUrl :: Lan -> Text
+
+          -- | The host part of a URL, without scheme, port, path or brackets.
+          hostOf :: Text -> Text
+
+          -- | Whether a host is one of the accepted kinds above.
+          privateHost :: Text -> Bool
+          "
+      }
+      : { analysis: Text
+        , behaviour: Text
+        , cautions: List Text
+        , interface: List { name: Text, summary: Text }
+        , purpose: Text
+        }

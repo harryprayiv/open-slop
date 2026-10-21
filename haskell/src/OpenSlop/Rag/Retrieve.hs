@@ -39,14 +39,15 @@
 -- the agent's decisions are typed (OpenSlop.Agent.Action).
 -- 'citedSources' stays for reading numbers out of earlier free-text turns.
 --
--- The instruction that a source answers a part in other words than the
--- question's was added on 2026-10-18. qwen2.5-coder:7b was sent the one
--- chunk that answers "how far below the closest hit's similarity may a hit
--- be ... when there is no reranker?" (the comment on relevanceMargin) and
--- "what does the reranker do when its reply leaves out one of the
--- documents sent?" (rerank's comment: such a reply is an error), and gave
--- both a gap: the first chunk does not say "reranker", the second states
--- the rule as an error rather than as behaviour.
+-- On 2026-10-18 qwen2.5-coder:7b was sent the one chunk that answers "how
+-- far below the closest hit's similarity may a hit be ... when there is no
+-- reranker?" (the comment on relevanceMargin) and "what does the reranker
+-- do when its reply leaves out one of the documents sent?" (rerank's
+-- comment: such a reply is an error), and gave both a gap. An instruction
+-- that a source answers a part when it states the fact in other words than
+-- the question's was tried the same day and removed: both still came back
+-- as gaps, and nothing else changed. A larger chat model is the next thing
+-- to measure for these two, not more instructions.
 --
 -- Every server here is a 'Lan'; see "OpenSlop.Rag.Locality". The request
 -- itself is made by "OpenSlop.ChatStream".
@@ -268,7 +269,6 @@ instructions =
     , "Write each claim as a complete sentence in your own words that names what it is about, not a fragment copied from a source."
     , "Give one claim per fact, so each claim lists the sources for that fact alone. Read every source before deciding a part is not answered."
     , "Only state what a source says. If the sources do not answer a part, give it no claims and say what is missing in its gap; do not guess."
-    , "A source answers a part when it states the fact asked for, even in other words than the question's. If it states the fact but not a condition the question adds, answer from it and name only that condition in the gap."
     , "A source that is documentation (a .md, .txt, .org or .rst file, or a README) describes the code as it was when it was written and can be out of date. When it disagrees with a source that is code, the code is right."
     , "A source whose path ends in .chase is a summary of code: its signatures and types are exact, but its notes (lines starting with !, >, ? or %) were written by hand or by a model and can be out of date. When it disagrees with a source that is code, the code is right."
     , "Earlier turns of the conversation are context, not sources."

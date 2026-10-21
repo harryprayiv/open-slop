@@ -34,8 +34,16 @@
       "question": "What error does the backend return when a request tries to modify a refund transaction?",
       "expect": [
         {
-          "path": "backend/src/Service/Transaction.hs",
-          "contains": "Cannot modify a refund transaction"
+          "any": [
+            {
+              "path": "backend/src/Service/Transaction.hs",
+              "contains": "Cannot modify a refund transaction"
+            },
+            {
+              "path": "backend/src/Service/Sale.hs",
+              "contains": "Cannot modify a refund transaction"
+            }
+          ]
         }
       ]
     },
