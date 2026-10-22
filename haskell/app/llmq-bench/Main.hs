@@ -107,11 +107,13 @@ import Control
 import Control.Concurrent (myThreadId, threadDelay, throwTo)
 import Control.Exception (AsyncException (UserInterrupt), finally)
 import Control.Monad (forM, forM_, unless, when)
-import Data.Aeson (Value (..), eitherDecodeFileStrict, encode)
+import Data.Aeson (Value (..), eitherDecodeFileStrict, encode, object, (.=))
+import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy qualified as BL
 import Data.IORef
+import Data.Foldable (toList)
 import Data.List (nub, partition)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust)
@@ -294,7 +296,7 @@ runBench o target = do
                 modifyIORef' listedAll (Map.insertWith (<>) ep.backend [catalogueKey m.name | m <- served])
                 let names = [m.name | m <- served]
                     wanted = [n | n <- names, maybe True (`T.isInfixOf` (endpointId ep <> "/" <> n)) o.only]
-                forM_ wanted \name -> do
+                forM_ wanted \name -> unlessEmbedding client ep b name do
                   cur <- readIORef current
                   let fp = fingerprintOf body name
                       before = pathOf ["models", ep.backend, catalogueKey name] cur
@@ -324,7 +326,7 @@ runBench o target = do
                                       Just (Array ps) -> not (null ps) && and [maybe False (not . T.null . T.strip) (textOf "answer" p) | p <- foldr (:) [] ps]
                                       _ -> False
                                 if o.reprobe || Just recorded /= fp || not answered then Nothing else Just (Object r, day')
-                          r <- measureModel (cfg (samplerFor ep)) (Target ep b name numCtx (filter (/= name) names) prior')
+                          r <- measureModel (cfg (samplerFor ep)) (Target ep b name numCtx (known >>= (.ctx)) (filter (/= name) names) prior')
                           let entry = entryFor day ep b known name fp r
                           modifyIORef' freshAll (<> [(ep.backend, catalogueKey name, entry)])
                           unless fresh' do
@@ -465,3 +467,29 @@ say = TIO.hPutStrLn stderr . ("llmq-bench: " <>)
 
 die' :: Text -> IO a
 die' t = hPutStrLn stderr ("llmq-bench: " <> T.unpack t) >> exitFailure
+
+-- | Run the action unless the model is one only an embedding route serves.
+-- ollama's /api/show lists a model's capabilities, and an embedding model
+-- such as nomic-embed-text has "embedding" and no "completion". Every
+-- request the bench makes is a generate or a chat, which such a model
+-- answers with a 400, so on 2026-10-21 nomic-embed-text, pulled for
+-- llmq-index, was "measured" as 27 failures and an entry with no figures,
+-- and marked for measuring again on every run because that entry recorded
+-- problems. It is skipped, and says why. A model whose capabilities cannot
+-- be read (an older ollama, hailo-ollama, llama-server) is measured as
+-- before.
+unlessEmbedding :: Client -> Endpoint -> Backend -> Text -> IO () -> IO ()
+unlessEmbedding client ep b name act = case b.engine of
+  Ollama -> do
+    r <- postJsonWithin (Just 30) client NoAuth ep.url "/api/show" (object ["model" .= name])
+    let caps = do
+          body <- either (const Nothing) Just r
+          Object v <- Aeson.decode body
+          Array cs <- KeyMap.lookup "capabilities" v
+          pure [c | String c <- toList cs]
+    case caps of
+      Just cs
+        | "completion" `notElem` cs ->
+            say ("skip " <> endpointId ep <> "/" <> name <> ": its capabilities are " <> T.intercalate ", " cs <> ", with no completion, so it answers no generate or chat request")
+      _ -> act
+  _ -> act

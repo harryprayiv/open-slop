@@ -136,6 +136,14 @@ data Target = Target
   , name :: Text
   , numCtx :: Maybe Int
   -- ^ ollama's num_ctx: the window llmq uses for this model
+  , windowCap :: Maybe Int
+  -- ^ the catalogue's ctx for this model on any engine. On ollama it is
+  -- also numCtx; on hailo-ollama it is the only statement of the window,
+  -- because the server reports none and a model's NPU build holds less
+  -- than the backend's ctx: llama3.2:3b answered prompts of about 830
+  -- tokens and dropped every one from about 960 on 2026-10-22, with a 500
+  -- read error after 10 to 17 s, which the bench saw as IncompleteHeaders
+  -- on every 1024-token trial.
   , others :: [Text]
   -- ^ other models on the same endpoint, for switching away on hailo
   , priorRestraint :: Maybe (Value, Text)
@@ -181,7 +189,7 @@ measureModel cfg tg = do
   let window = case (trained, tg.numCtx) of
         (Just t, Just c) -> Just (min t c)
         (t, c) -> maybe t Just c
-      limit = fromMaybe tg.backend.ctx window
+      limit = maybe id min tg.windowCap (fromMaybe tg.backend.ctx window)
       sizesOk =
         [ s
         | s <- cfg.sizes
