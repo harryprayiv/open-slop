@@ -19,11 +19,9 @@ import Api as Api
 import Data.Array (elem, head, null)
 import Data.Array as Array
 import Data.Either (Either(..), either)
-import Data.Foldable (all)
 import Data.Int (floor)
 import Data.Maybe (Maybe(..), fromMaybe)
-import Data.String (Pattern(..), contains, joinWith, trim)
-import Data.String.CodeUnits (singleton, toCharArray)
+import Data.String (joinWith, trim)
 import Effect (Effect)
 import Effect.Aff (Milliseconds(..), delay)
 import Effect.Aff.Class (class MonadAff)
@@ -116,13 +114,13 @@ handle = case _ of
   NewSessionInput s -> H.modify_ _ { newSession = s }
   StartSession -> do
     s <- H.gets (trim <<< _.newSession)
-    if validName s then do
+    if s == "" then H.modify_ _ { error = Just "Type a name for the conversation first." }
+    else do
       H.modify_ \st -> st
         { sessions = if elem s st.sessions then st.sessions else st.sessions <> [ s ]
         , newSession = ""
         }
       openSession s
-    else H.modify_ _ { error = Just "A conversation's name is letters, digits, - and _ only." }
   QuestionInput s -> H.modify_ _ { question = s }
   Ask -> do
     st <- H.get
@@ -185,11 +183,6 @@ running = case _ of
   Just { phase: Failed _ } -> false
   Just _ -> true
   Nothing -> false
-
-validName :: String -> Boolean
-validName s = s /= "" && all ok (toCharArray s)
-  where
-  ok c = contains (Pattern (singleton c)) "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
 
 render :: forall m. State -> H.ComponentHTML Action () m
 render st = HH.main_ $ case st.key of

@@ -40,6 +40,7 @@ import Data.HTTP.Method (Method(..))
 import Data.Maybe (Maybe(..))
 import Effect.Aff (Aff)
 import Foreign.Object (Object)
+import JSURI (encodeURIComponent)
 
 -- | The gateway key, sent as a bearer token on every call.
 newtype Key = Key String
@@ -86,10 +87,12 @@ models k = decoded decodeJson <$> call k GET "/index/models" Nothing
 sessions :: Key -> Aff (Either String (Array SessionSummary))
 sessions k = decoded decodeJson <$> call k GET "/index/sessions" Nothing
 
--- | A session's turns. The name is checked by the page to be letters,
--- | digits, - and _, so it needs no escaping in the path.
+-- | A session's turns. The name is escaped for the path, so any name
+-- | llmq-index chat accepts can be opened here too.
 session :: Key -> String -> Aff (Either String (Array Turn))
-session k name = decoded turns <$> call k GET ("/index/sessions/" <> name) Nothing
+session k name = case encodeURIComponent name of
+  Nothing -> pure (Left ("the conversation name " <> show name <> " cannot be put in a URL"))
+  Just escaped -> decoded turns <$> call k GET ("/index/sessions/" <> escaped) Nothing
   where
   turns j = do
     o <- (decodeJson j :: Either JsonDecodeError (Object Json))
