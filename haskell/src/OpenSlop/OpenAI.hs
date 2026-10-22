@@ -14,6 +14,15 @@
 -- model can tell the required type from the last attempt and the compiler's
 -- complaint about it, and none of the local backends' chat templates show a
 -- name field to the model.
+--
+-- Assistant messages are the exception and keep only their text. A model
+-- reads its own earlier turns as examples of what to write, so a label on
+-- them is copied: on 2026-10-21 qwen2.5-coder-7b answered every repair of
+-- an import prompt with "Attempt:" on its first line, because its failed
+-- attempt had been shown back to it as "Attempt:" followed by the code, and
+-- Grace's parser then failed on the label. The system message after each
+-- attempt still says "Error:", so the model can tell its attempt from the
+-- complaint.
 module OpenSlop.OpenAI
   ( Role (..)
   , roleText
@@ -67,7 +76,7 @@ data Message = Message
 -- | Content is a string, or a list of parts of which only text parts are
 -- accepted; their texts are joined with newlines. The openai bindings send
 -- the list form. A name becomes the content's first line, followed by a
--- colon.
+-- colon, except on an assistant message (see the module header).
 instance FromJSON Message where
   parseJSON = withObject "message" \o -> do
     role <- o .: "role"
@@ -80,7 +89,7 @@ instance FromJSON Message where
       Just _ -> fail "message content must be a string or a list of text parts"
     name <- o .:? "name"
     let content = case T.strip <$> name of
-          Just n | not (T.null n) -> n <> ":\n" <> body
+          Just n | not (T.null n), role /= RoleAssistant -> n <> ":\n" <> body
           _ -> body
     pure Message {role, content}
     where

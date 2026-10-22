@@ -45,11 +45,11 @@
         "utils": "utils"
       },
       "locked": {
-        "lastModified": 1790537297,
-        "narHash": "sha256-HuXf87HNSxy4eJyykTNR+orafo1YP4yGkf641juE4W0=",
+        "lastModified": 1792632619,
+        "narHash": "sha256-qoSn14/4cTJqUKAh2vWndwHqvbAJoPXM4fCktBBmVxE=",
         "owner": "harryprayiv",
         "repo": "grace",
-        "rev": "9cc1a0511ceb37f27647ff185268fe7b275dc37f",
+        "rev": "404b7d4e5be8d480ab54ad6d9945efb14dc3fde6",
         "type": "github"
       },
       "original": {

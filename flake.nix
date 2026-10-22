@@ -104,6 +104,17 @@
               })
             ]
           );
+
+          # A Grace-linked executable with grace_datadir pointing at Grace's
+          # source, unless the caller already set it; see llmq-grace below.
+          withGraceData =
+            exe: drv:
+            hlib.overrideCabal drv (old: {
+              buildTools = (old.buildTools or [ ]) ++ [ final.makeWrapper ];
+              postFixup = (old.postFixup or "") + ''
+                wrapProgram $out/bin/${exe} --set-default grace_datadir ${grace}
+              '';
+            });
         in
         {
           haskell = prev.haskell // {
@@ -133,11 +144,23 @@
             # The Grace stage runner. The GHC check is off because it cannot
             # pass; the size is the known cost of linking Grace, and this is
             # a workstation tool, never part of a row's closure.
-            llmq-grace = hlib.overrideCabal (
-              hlib.justStaticExecutables (hlib.dontHaddock (hlib.enableCabalFlag graceHpkgs.open-slop "grace"))
-            ) (_: { disallowGhcReference = false; });
+            #
+            # Wrapped with grace_datadir, because Grace reads its import
+            # prompt's instructions (prompts/abnf.md, prompts/inference.md)
+            # through Paths_grace.getDataFileName and grace.cabal lists no
+            # data-files, so the installed data directory it points at never
+            # exists. Every `import prompt` failed on 2026-10-21 with
+            # "openFile: does not exist", which the openai binding reports
+            # as a ConnectionError. cabal's generated Paths module reads
+            # grace_datadir before the installed path; Grace's source is
+            # where the files are.
+            llmq-grace = withGraceData "llmq-grace" (
+              hlib.overrideCabal (
+                hlib.justStaticExecutables (hlib.dontHaddock (hlib.enableCabalFlag graceHpkgs.open-slop "grace"))
+              ) (_: { disallowGhcReference = false; })
+            );
 
-            grace = hlib.justStaticExecutables (hlib.dontHaddock graceHpkgs.grace);
+            grace = withGraceData "grace" (hlib.justStaticExecutables (hlib.dontHaddock graceHpkgs.grace));
 
             # Exposed so the dev shell and anything else that needs Grace on
             # the workstation uses the same set as llmq-grace.

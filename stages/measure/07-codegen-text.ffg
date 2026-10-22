@@ -1,12 +1,27 @@
 # import prompt: the model writes a Grace program of the type asked for,
 # Grace type-checks it, and a program that does not check is sent back with
-# the error until it does or the attempts run out. Grace puts its grammar
-# and inference rules in front of the model for this, about 8,000 tokens,
-# so the cold run is mostly reading that preamble. Against the warm runs on
-# llama-server it shows what the prompt cache is worth for code generation,
-# and the repairs column shows how often the 7B writes Grace that checks.
-let key = env:OPEN_SLOP_KEY : Key
+# the error until it does or the attempts run out. Grace puts its grammar,
+# inference rules and examples in front of the model for this, about 10,000
+# tokens, so the cold run is mostly reading that preamble. Against the warm
+# runs on llama-server it shows what the prompt cache is worth for code
+# generation, and the repairs column shows how often the 7B writes Grace
+# that checks.
+#
+# The task can be done in Grace alone, with text concatenation, and the type
+# is on the import rather than on its application, so the model is asked for
+# exactly Text -> Text. The key and the model are written inside the prompt
+# record rather than bound with let, because Grace offers every let binding
+# in scope to the model as a value it may use: on 2026-10-21 the 7B answered
+# with "Hello, " + model + "!", treating the model's name as the input. The
+# first version asked for uppercasing, which Grace has no builtin for, and
+# annotated the application, so the model was given an unsolved input type
+# and a task that could only be done by calling prompt again.
+let greet =
+      import prompt
+        { key: env:OPEN_SLOP_KEY : Key
+        , model: env:OPEN_SLOP_MODEL : Text
+        , text: "Put \"Hello, \" in front of the input and \"!\" after it"
+        }
+        : Text -> Text
 
-let model = env:OPEN_SLOP_MODEL : Text
-
-in  import prompt{ key, model, text: "Uppercase the input" } "abc" : Text
+in  greet "Ada"
