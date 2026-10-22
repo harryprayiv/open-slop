@@ -22,7 +22,7 @@ package:
     - halogen
     - http-methods
     - integers
-    - jsuri
+    - js-uri
     - maybe
     - prelude
     - strings
