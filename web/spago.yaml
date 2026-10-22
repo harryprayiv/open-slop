@@ -1,0 +1,37 @@
+# The index's web page: a Halogen application that asks llmq-index through
+# open-slop-gateway's /index routes. Built into one index.js beside
+# index.html; open-slop-gateway --web serves the directory.
+#
+# Packages come from the PureScript registry's package set, so every
+# version is one the set's maintainers built together. Bump the set with
+# `spago upgrade` and commit spago.lock with it.
+package:
+  name: open-slop-web
+  dependencies:
+    - aff
+    - affjax
+    - affjax-web
+    - argonaut-codecs
+    - argonaut-core
+    - arrays
+    - bifunctors
+    - effect
+    - either
+    - foldable-traversable
+    - foreign-object
+    - halogen
+    - http-methods
+    - integers
+    - maybe
+    - prelude
+    - strings
+    - web-html
+    - web-storage
+  bundle:
+    module: Main
+    outfile: index.js
+    platform: browser
+    type: app
+workspace:
+  packageSet:
+    registry: 60.0.0

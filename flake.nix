@@ -72,6 +72,20 @@
       url = "github:PrismML-Eng/llama.cpp";
       flake = false;
     };
+
+    # The web page's toolchain: purs, spago and esbuild from the PureScript
+    # community's overlay, and mkSpagoDerivation, which builds a spago
+    # project from its spago.lock with every package fetched by hash, so
+    # the build needs no network and no import-from-derivation.
+    purescript-overlay = {
+      url = "github:thomashoneyman/purescript-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    mkSpagoDerivation = {
+      url = "github:jeslie0/mkSpagoDerivation";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -81,6 +95,8 @@
       flake-utils,
       grace,
       llama-cpp-prismml,
+      purescript-overlay,
+      mkSpagoDerivation,
     }:
     let
       compiler = "ghc96";
@@ -220,7 +236,34 @@
       let
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ overlay ];
+          overlays = [
+            overlay
+            purescript-overlay.overlays.default
+            mkSpagoDerivation.overlays.default
+          ];
+        };
+
+        # The index's web page, served by open-slop-gateway --web. Built
+        # from web/spago.lock, so it exists once that lock is committed:
+        # until then the output is absent rather than an evaluation error
+        # in every consumer's flake check. Not in the overlay: the fleet's
+        # rows have no use for it, and it is copied to the machine that
+        # serves the index.
+        web = pkgs.mkSpagoDerivation {
+          spagoYaml = ./web/spago.yaml;
+          spagoLock = ./web/spago.lock;
+          src = ./web;
+          version = "0.1.0";
+          nativeBuildInputs = [
+            pkgs.purs-unstable
+            pkgs.spago-unstable
+            pkgs.esbuild
+          ];
+          buildPhase = "spago bundle";
+          installPhase = ''
+            mkdir -p $out
+            cp index.html index.js $out/
+          '';
         };
 
         hpkgs = pkgs.haskell.packages.${compiler};
@@ -234,6 +277,7 @@
           grace = pkgs.open-slop.grace;
           llama-cpp-prismml = pkgs.open-slop.llama-cpp-prismml;
         }
+        // nixpkgs.lib.optionalAttrs (builtins.pathExists ./web/spago.lock) { inherit web; }
         # callPackage on a file that returns an attribute set adds override
         # and overrideDerivation to it, which are functions, and flake check
         # refuses any packages.* entry that is not a derivation. Only the
@@ -336,9 +380,23 @@
             pkgs.xsel
             pkgs.jq
             pkgs.open-slop.grace
+            # the web page: `spago build` and `spago bundle` in web/
+            pkgs.purs-unstable
+            pkgs.spago-unstable
+            pkgs.esbuild
           ];
 
           withHoogle = true;
+        };
+
+        # The web page's toolchain alone, without the Haskell and Grace set:
+        # `nix develop .#web`, then `spago build` or `spago bundle` in web/.
+        devShells.web = pkgs.mkShell {
+          packages = [
+            pkgs.purs-unstable
+            pkgs.spago-unstable
+            pkgs.esbuild
+          ];
         };
       }
     );

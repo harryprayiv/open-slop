@@ -41,6 +41,8 @@ module OpenSlop.Rag.Store
   , openSession
   , listSessions
   , sessionTurns
+  , sessionTurnsStored
+  , findSession
   , addTurn
   ) where
 
@@ -441,6 +443,21 @@ listSessions conn = do
 -- | The session's turns in order, as (role, content).
 sessionTurns :: Connection -> Int64 -> IO [(Text, Text)]
 sessionTurns conn sid = query conn "SELECT role, content FROM rag_turns WHERE session_id = ? ORDER BY id" (Only sid)
+
+-- | The session with this name, without creating it.
+findSession :: Connection -> Text -> IO (Maybe Int64)
+findSession conn n = do
+  rows <- query conn "SELECT id FROM rag_sessions WHERE name = ?" (Only n)
+  pure case rows of
+    [Only i] -> Just i
+    _ -> Nothing
+
+-- | The session's turns in order with what was stored beside each:
+-- (role, content, sources). llmq-index chat stores an assistant turn's
+-- sources as a list of locations; the gateway's ask jobs store the whole
+-- cited answer, { parts, sources }, so the web page can show it again.
+sessionTurnsStored :: Connection -> Int64 -> IO [(Text, Text, Maybe Value)]
+sessionTurnsStored conn sid = query conn "SELECT role, content, sources FROM rag_turns WHERE session_id = ? ORDER BY id" (Only sid)
 
 addTurn :: Connection -> Int64 -> Text -> Text -> Maybe Value -> Maybe Text -> IO ()
 addTurn conn sid role content sources model =

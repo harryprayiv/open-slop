@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>open-slop index</title>
+<style>
+:root { --fg: #1d1d1f; --bg: #fbfbf8; --muted: #6b6b6b; --line: #deded8; --accent: #2f5d8a; --gap: #8a5a2f; }
+@media (prefers-color-scheme: dark) { :root { --fg: #e8e8e3; --bg: #18181a; --muted: #9a9a95; --line: #333336; --accent: #8ab4e0; --gap: #e0b48a; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; }
+main { max-width: 52rem; margin: 0 auto; padding: 1rem; }
+h1 { font-size: 1.2rem; margin: 0 0 1rem; }
+.bar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: 1rem; }
+input, select, textarea, button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: .35rem .5rem; }
+button { cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+textarea { width: 100%; min-height: 5rem; }
+.turn { border-top: 1px solid var(--line); padding: .75rem 0; }
+.user { font-weight: 600; }
+.ask { color: var(--muted); margin: .5rem 0 0; }
+.gap { color: var(--gap); }
+sup { color: var(--accent); }
+.sources { color: var(--muted); font-size: .9rem; padding-left: 1.5rem; }
+.sources .cited { color: var(--fg); }
+.sources code { overflow-wrap: anywhere; }
+.job { color: var(--accent); }
+.error { color: #b3261e; }
+</style>
+<script defer src="index.js"></script>
+</head>
+<body></body>
+</html>

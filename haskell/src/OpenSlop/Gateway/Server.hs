@@ -6,8 +6,63 @@
 --   GET  /v1/models            every model the backends report, as ids
 --   POST /v1/chat/completions  one request, translated for its backend
 --
--- Everything but /healthz needs a bearer key. Every refusal is an OpenAI
--- error body, so a client built on the openai bindings (Grace included)
+-- ============================================================================
+-- THE INDEX AS A MODEL
+-- ============================================================================
+--
+-- With an index configured (open-slop-gateway --index), llmq-index's
+-- database is served as models of its own: `index` asks the whole index,
+-- and `index/NAME` asks only the root whose last path component is NAME
+-- (index/cheeblr for ~/ingest/cheeblr). Both are listed by /v1/models. A
+-- request to one is answered by "OpenSlop.Rag.Ask", the same search,
+-- reranking, margin and packing as llmq-index ask, so what its evaluation
+-- sets measured holds here.
+--
+-- The question is the last user message. Earlier user and assistant
+-- messages are the conversation, and the question is rewritten against
+-- them before searching, as in llmq-index chat. System messages are left
+-- out: the index sends its own instructions and its own answer schema,
+-- and a client's instructions (Grace sends its type as system messages)
+-- would only compete with them.
+--
+-- With a JSON response format the reply's content is the cited answer as
+-- JSON, { parts, sources }: each part with what it asks, its claims and the
+-- numbers of the sources each rests on, and its gap; each source with its
+-- number, path, lines, heading and whether a claim cited it. That is the
+-- type stages/index/ask.ffg declares, so a Grace program asks the index the
+-- way it asks a model and gets the answer at a type. Without a response
+-- format the content is the answer as text, claim by claim with source
+-- numbers, then the sources.
+--
+-- The client's schema is not sent to the model. The index's own schema is
+-- stricter than anything Grace can express (every part answered or
+-- explained, every source number one that was sent), and that is the one
+-- the model is held to.
+--
+-- ============================================================================
+-- THE WEB PAGE
+-- ============================================================================
+--
+-- With --web DIR the gateway also serves the page built from open-slop's
+-- web/ directory: GET / is DIR/index.html and GET /NAME is DIR/NAME, for a
+-- single path segment with no slashes, so the page and the API it calls
+-- share an origin and need no cross-origin rules. The page holds nothing
+-- but code; it asks for the key and sends it on every call.
+--
+-- The page asks the index through these, which need the key like
+-- everything else and are served only with an index:
+--
+--   GET  /index/models          ["index", "index/NAME", ...]
+--   GET  /index/sessions        the stored conversations
+--   GET  /index/sessions/NAME   one conversation's turns, each assistant
+--                               turn with its cited answer when the
+--                               gateway stored one
+--   POST /index/asks            {session, model, question} -> 202 {id}
+--   GET  /index/asks/ID         where that job is; see
+--                               "OpenSlop.Gateway.Asks"
+--
+-- Everything but /healthz and the page needs a bearer key. Every refusal
+-- is an OpenAI error body, so a client built on the openai bindings (Grace included)
 -- surfaces the message rather than a decode failure.
 --
 -- The model listing is asked of the backends and cached for thirty
@@ -24,10 +79,13 @@
 -- other way: Grace does not return the usage, and an import prompt makes
 -- as many calls as its repairs need.
 --
--- Nothing here orders or queues requests. Each backend already serves one
--- request at a time (ollama with OLLAMA_NUM_PARALLEL=1, llama-server with
--- one slot) and queues the rest itself; a second queue in front of it would
--- only hide the first one's position.
+-- Requests to /v1/chat/completions are not ordered or queued here. Each
+-- backend already serves one request at a time (ollama with
+-- OLLAMA_NUM_PARALLEL=1, llama-server with one slot) and queues the rest
+-- itself; a second queue in front of it would only hide the first one's
+-- position. The page's index jobs are the exception and run one at a time
+-- in their own queue, which can report a position; "OpenSlop.Gateway.Asks"
+-- says why.
 module OpenSlop.Gateway.Server
   ( Env (..)
   , newEnv
@@ -37,6 +95,7 @@ module OpenSlop.Gateway.Server
 import Control.Monad (forM)
 import Data.Aeson (ToJSON (..), Value, object, (.=))
 import Data.Aeson qualified as Aeson
+import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Char8 qualified as BC
 import Data.ByteString.Lazy qualified as BL
 import Data.IORef
@@ -56,7 +115,14 @@ import OpenSlop.Gateway.Route
 import OpenSlop.Gateway.Translate
 import OpenSlop.Http
 import OpenSlop.OpenAI
+import OpenSlop.Gateway.Asks (Asks, answerValue, indexModels, jobStatus, scopeOf, submit, unanswered)
+import OpenSlop.Rag.Ask (Asking (..), Selection (..), answerWith, select)
+import OpenSlop.Rag.Retrieve (Answer (..))
+import OpenSlop.Rag.Store (Hit (..), SessionInfo (..), findSession, listSessions, sessionTurnsStored)
 import OpenSlop.Stats (Stats (..), Verdict (..), judge)
+import System.Directory (doesFileExist)
+import System.FilePath (takeExtension, (</>))
+import Text.Read (readMaybe)
 
 data Env = Env
   { catalogue :: Catalogue
@@ -73,19 +139,28 @@ data Env = Env
   , maxBodyBytes :: Int
   , record :: Value -> IO ()
   -- ^ one object per chat request; see the module header
+  , index :: Maybe Asking
+  -- ^ llmq-index's database, served as the models index and index/NAME;
+  -- see the module header
+  , asks :: Maybe Asks
+  -- ^ the index's job queue, for the web page; present with an index
+  , web :: Maybe FilePath
+  -- ^ the built web page's directory
   }
 
-newEnv :: Catalogue -> Keys -> (Text -> IO ()) -> (Request -> IO ()) -> (Value -> IO ()) -> IO Env
-newEnv catalogue keys logLine pause record = do
+newEnv :: Catalogue -> Keys -> (Text -> IO ()) -> (Request -> IO ()) -> (Value -> IO ()) -> Maybe Asking -> Maybe Asks -> Maybe FilePath -> IO Env
+newEnv catalogue keys logLine pause record index asks web = do
   client <- newClient
   listing <- newIORef Nothing
   counter <- newIORef 0
-  pure Env {catalogue, keys, client, listing, counter, logLine, pause, maxBodyBytes = 8 * 1024 * 1024, record}
+  pure Env {catalogue, keys, client, listing, counter, logLine, pause, maxBodyBytes = 8 * 1024 * 1024, record, index, asks, web}
 
 app :: Env -> Application
 app env req respond =
   case (requestMethod req, pathInfo req) of
     ("GET", ["healthz"]) -> respond (responseLBS status200 [(hContentType, "text/plain")] "ok\n")
+    ("GET", []) | Just dir <- env.web -> page dir "index.html" >>= respond
+    ("GET", [file]) | Just dir <- env.web, servable file -> page dir file >>= respond
     (method, path) -> case authorise env.keys (lookup "Authorization" (requestHeaders req)) of
       Left why -> do
         env.logLine ("refused " <> TE.decodeUtf8With TE.lenientDecode method <> " /" <> T.intercalate "/" path <> ": " <> why)
@@ -93,6 +168,7 @@ app env req respond =
       Right who -> case (method, path) of
         ("GET", ["v1", "models"]) -> modelList env >>= respond . jsonResponse status200
         ("POST", ["v1", "chat", "completions"]) -> chat env who req >>= respond
+        (_, "index" : rest) | Just a <- env.index, Just q <- env.asks -> indexRoute env a q method rest req >>= respond
         _ -> respond (errorResponse (ApiError 404 "invalid_request_error" (Just "not_found") ("no route " <> TE.decodeUtf8With TE.lenientDecode method <> " /" <> T.intercalate "/" path)))
 
 jsonResponse :: (ToJSON a) => Status -> a -> Response
@@ -128,19 +204,24 @@ currentListing env = do
 modelList :: Env -> IO Value
 modelList env = do
   l <- currentListing env
+  names <- maybe (pure []) indexModels env.index
   pure
     ( object
         [ "object" .= ("list" :: Text)
         , "data"
-            .= [ object
+            .= ( [ object
                    [ "id" .= (endpointId ep <> "/" <> n)
                    , "object" .= ("model" :: Text)
                    , "created" .= (0 :: Int)
                    , "owned_by" .= ep.row
                    ]
-               | (ep, names) <- l
-               , n <- names
+               | (ep, served) <- l
+               , n <- served
                ]
+              <> [ object ["id" .= n, "object" .= ("model" :: Text), "created" .= (0 :: Int), "owned_by" .= ("llmq-index" :: Text)]
+                 | n <- names
+                 ]
+               )
         ]
     )
 
@@ -154,6 +235,10 @@ chat env who req = do
       -- aeson prefixes "Error in $: "; the JSON path after "in" is kept
       -- when it points inside the body, since it names the bad field.
       Left e -> reject started Nothing Nothing (invalidRequest Nothing (T.replace "Error in $: " "" (T.pack e)))
+      Right (r :: ChatRequest)
+        | Just a <- env.index
+        , r.model == "index" || "index/" `T.isPrefixOf` r.model ->
+            askIndex started a r
       Right (r :: ChatRequest) -> do
         l <- currentListing env
         case resolveTarget env.catalogue l r.model of
@@ -167,6 +252,59 @@ chat env who req = do
       ended <- getPOSIXTime
       env.record (requestRecord who started ended r t Nothing (Left e))
       pure (errorResponse e)
+    askIndex started a r = do
+      scopeFor <- scopeOf a r.model
+      let turns = [(if m.role == RoleAssistant then "assistant" else "user", m.content) | m <- r.messages, m.role /= RoleSystem]
+      case (scopeFor, reverse turns) of
+        (Left why, _) -> reject started (Just r) Nothing (ApiError 404 "invalid_request_error" (Just "model_not_found") why)
+        (_, []) -> reject started (Just r) Nothing (invalidRequest Nothing "a question to the index is the last user message, and there is none")
+        (_, (role, _) : _) | role /= "user" -> reject started (Just r) Nothing (invalidRequest Nothing "a question to the index is the last user message; this conversation ends with an assistant turn")
+        (Right sc, (_, question) : earlier) -> do
+          env.pause req
+          scopeRef <- newIORef sc
+          let one = a {scope = scopeRef, note = \t -> env.logLine (who <> " " <> r.model <> ": " <> t)}
+              history = reverse earlier
+          t0 <- getPOSIXTime
+          picked <- select one history question
+          answered <- case picked of
+            -- Nothing in scope matches: an answer with one unanswered part,
+            -- so a client gets the same shape whatever the index holds.
+            -- select says so in words beginning "nothing"; every other
+            -- Left is a server failing (the embedder, the reranker, the
+            -- chat model rewriting a follow-up) and stays an error, so an
+            -- outage is never returned as an answer that the sources are
+            -- silent.
+            Left why | "nothing " `T.isPrefixOf` why -> pure (Right (Left why))
+            Left e -> pure (Left e)
+            Right sel -> fmap Right <$> answerWith one history question sel.packed (const (pure ()))
+          t1 <- getPOSIXTime
+          case answered of
+            Left e -> do
+              env.logLine (who <> " " <> r.model <> " failed: " <> e)
+              env.record (requestRecord who started t1 (Just r) Nothing (Just (t1 - t0)) (Left (ApiError 502 "api_error" (Just "backend_error") e)))
+              pure (errorResponse (ApiError 502 "api_error" (Just "backend_error") (r.model <> ": " <> e)))
+            Right got -> do
+              n <- atomicModifyIORef' env.counter (\i -> (i + 1, i + 1))
+              let asJson = case r.responseFormat of
+                    Just FormatJsonSchema {} -> True
+                    Just FormatJsonObject -> True
+                    _ -> False
+                  content = case got of
+                    Left why -> if asJson then TE.decodeUtf8 (BL.toStrict (Aeson.encode (unanswered question why))) else "Not in the sources: " <> why
+                    Right ans -> if asJson then TE.decodeUtf8 (BL.toStrict (Aeson.encode (answerValue ans))) else answerText ans
+                  promptTokens = either (const 0) (\ans -> fromMaybe 0 ans.promptTokens) got
+                  resp =
+                    ChatResponse
+                      { responseId = "chatcmpl-open-slop-" <> tshow (floor t0 :: Int) <> "-" <> tshow n
+                      , created = floor t0
+                      , model = r.model
+                      , content
+                      , finish = FinishStop
+                      , usage = Usage {promptTokens, completionTokens = 0}
+                      }
+              env.logLine (who <> " " <> r.model <> " answered in " <> tshow (floor (t1 - t0) :: Int) <> "s from " <> tshow (either (const 0) (\ans -> length ans.sources) got) <> " sources")
+              env.record (requestRecord who started t1 (Just r) Nothing (Just (t1 - t0)) (Right (promptTokens, False, 0, FinishStop)))
+              pure (responseLBS status200 [(hContentType, "application/json")] (Aeson.encode resp))
     run started t r c = do
       env.pause req
       t0 <- getPOSIXTime
@@ -237,6 +375,18 @@ chat env who req = do
               note (Right (promptTokens, estimated, completionTokens, reply.finish))
               pure (responseLBS status200 headers (Aeson.encode resp))
 
+-- | The answer as text: the rendered claims with their source numbers,
+-- then the sources, the cited ones marked.
+answerText :: Answer -> Text
+answerText ans =
+  ans.text
+    <> "\n\nSources:\n"
+    <> T.intercalate
+      "\n"
+      [ (if k `elem` ans.cited then "* [" else "  [") <> tshow k <> "] " <> h.path <> ":" <> tshow h.lineFrom <> "-" <> tshow h.lineTo
+      | (k, h) <- zip [1 :: Int ..] ans.sources
+      ]
+
 -- | One request as the record sink writes it. Times are seconds since the
 -- epoch, with fractions. A repair is a request with a message whose first line is the
 -- label Error, which is how Grace returns a failed attempt and the
@@ -283,6 +433,72 @@ requestRecord who started ended r t backendSeconds outcome =
             , "finish" .= tshow fin
             ]
     )
+
+-- | The page's routes under /index; see the module header.
+indexRoute :: Env -> Asking -> Asks -> BC.ByteString -> [Text] -> Request -> IO Response
+indexRoute env a q method rest req = case (method, rest) of
+  ("GET", ["models"]) -> jsonResponse status200 <$> indexModels a
+  ("GET", ["sessions"]) -> do
+    ss <- listSessions a.conn
+    pure (jsonResponse status200 [object ["name" .= s.name, "turns" .= s.turns, "created" .= s.created] | s <- ss])
+  ("GET", ["sessions", name]) ->
+    findSession a.conn name >>= \case
+      Nothing -> pure (jsonResponse status200 (object ["name" .= name, "turns" .= ([] :: [Value])]))
+      Just sid -> do
+        ts <- sessionTurnsStored a.conn sid
+        pure
+          ( jsonResponse
+              status200
+              ( object
+                  [ "name" .= name
+                  , "turns"
+                      .= [ object (["role" .= role, "text" .= text] <> ["answer" .= v | Just v@(Aeson.Object o) <- [stored], KeyMap.member "parts" o])
+                         | (role, text, stored) <- ts
+                         ]
+                  ]
+              )
+          )
+  ("POST", ["asks"]) -> do
+    raw <- strictRequestBody req
+    if BL.length raw > 65536
+      then pure (errorResponse (ApiError 413 "invalid_request_error" (Just "request_too_large") "a question is at most 64 KB"))
+      else case Aeson.decode raw of
+        Just (Aeson.Object o)
+          | Just (Aeson.String s) <- KeyMap.lookup "session" o
+          , Just (Aeson.String m) <- KeyMap.lookup "model" o
+          , Just (Aeson.String qn) <- KeyMap.lookup "question" o ->
+              submit q s m qn >>= \case
+                Left why -> pure (errorResponse (invalidRequest Nothing why))
+                Right i -> pure (jsonResponse (mkStatus 202 "Accepted") (object ["id" .= i]))
+        _ -> pure (errorResponse (invalidRequest Nothing "send {\"session\": TEXT, \"model\": TEXT, \"question\": TEXT}"))
+  ("GET", ["asks", n]) | Just i <- readMaybe (T.unpack n) ->
+    jobStatus q i >>= \case
+      Just v -> pure (jsonResponse status200 v)
+      Nothing -> pure (errorResponse (ApiError 404 "invalid_request_error" (Just "not_found") ("no job " <> n <> "; it was never submitted, or ended more than an hour ago")))
+  _ -> do
+    env.logLine ("no index route " <> TE.decodeUtf8With TE.lenientDecode method <> " /index/" <> T.intercalate "/" rest)
+    pure (errorResponse (ApiError 404 "invalid_request_error" (Just "not_found") ("no route /index/" <> T.intercalate "/" rest)))
+
+-- | A file of the built page: one path segment, no hidden files, no
+-- separators, so nothing outside the directory can be named.
+servable :: Text -> Bool
+servable f = not (T.null f) && not ("." `T.isPrefixOf` f) && T.all (\c -> c /= '/' && c /= '\\') f
+
+page :: FilePath -> Text -> IO Response
+page dir file = do
+  let path = dir </> T.unpack file
+  exists <- doesFileExist path
+  if exists
+    then pure (responseFile status200 [(hContentType, contentType (takeExtension path)), ("Cache-Control", "no-cache")] path Nothing)
+    else pure (responseLBS (mkStatus 404 "Not Found") [(hContentType, "text/plain")] "not found\n")
+  where
+    contentType = \case
+      ".html" -> "text/html; charset=utf-8"
+      ".js" -> "text/javascript; charset=utf-8"
+      ".css" -> "text/css; charset=utf-8"
+      ".svg" -> "image/svg+xml"
+      ".map" -> "application/json"
+      _ -> "application/octet-stream"
 
 -- | The budget with the output cap this request actually sent, so the
 -- verdict's warnings are about this request and not the catalogue default.
