@@ -100,7 +100,7 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.IORef (readIORef, writeIORef)
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
-import Converse (Asking (..), Selection (..), answerWith, select)
+import OpenSlop.Rag.Ask (Asking (..), Selection (..), answerWith, select)
 import Numeric (showFFloat)
 import OpenSlop.Rag.Retrieve (Answer (..), Part (..))
 import OpenSlop.Rag.Store (Hit (..), chunksMatching)

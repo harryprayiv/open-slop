@@ -54,7 +54,8 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (defaultTimeLocale, formatTime)
-import Converse (Asking (..), askOnce, converse)
+import Converse (askOnce, converse)
+import OpenSlop.Rag.Ask (Asking (..))
 import Eval (EvalOpts (..), runEval)
 import Ingest (IngestOpts (..), ingestRoot)
 import Numeric (showFFloat)
@@ -401,4 +402,5 @@ asking g conn t = do
       , splitQuestions = t.split
       , maxWait = t.maxWait
       , scope = sc
+      , note = say
       }

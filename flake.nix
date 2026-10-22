@@ -250,6 +250,9 @@
         # rows have no use for it, and it is copied to the machine that
         # serves the index.
         web = pkgs.mkSpagoDerivation {
+          # Named here: mkSpagoDerivation does not take the name from
+          # spago.yaml, and without pname the derivation's name is null.
+          pname = "open-slop-web";
           spagoYaml = ./web/spago.yaml;
           spagoLock = ./web/spago.lock;
           src = ./web;

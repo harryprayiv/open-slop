@@ -1,7 +1,8 @@
 -- | Asking the index: one question, or a conversation kept in the database.
 --
--- Part of llmq-index; Main describes the program, and "OpenSlop.Rag.Retrieve"
--- describes one turn. This module adds the terminal around it: the raw JSON
+-- Part of llmq-index; Main describes the program, "OpenSlop.Rag.Retrieve"
+-- describes one turn, and "OpenSlop.Rag.Ask" chooses the sources and asks
+-- the model. This module adds the terminal around it: the raw JSON
 -- of the answer streams to stderr as progress, the answer is then printed
 -- claim by claim with its sources, the sources follow with the cited ones
 -- marked, and in a conversation every turn is stored under the session's
@@ -14,209 +15,26 @@
 -- server reports, so how many sources fit grows with the model and the
 -- hardware. The current figures are printed at the start.
 module Converse
-  ( Asking (..)
-  , Selection (..)
-  , select
-  , answerWith
-  , askOnce
+  ( askOnce
   , converse
   ) where
 
-import Control.Exception (AsyncException (..), throwIO, try)
 import Control.Monad (forM_, unless, when)
 import Data.Aeson (object, toJSON, (.=))
-import Data.List (sortOn)
-import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust)
-import Data.Ord (Down (..))
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (defaultTimeLocale, formatTime, getZonedTime)
-import Data.Time.Clock (diffUTCTime, getCurrentTime)
-import Numeric (showFFloat)
-import OpenSlop.Capacity (Capacity (..), describeCapacity, learn)
-import OpenSlop.Http (Client)
-import OpenSlop.Rag.Embed (Embedder)
-import OpenSlop.Rag.Rerank (Reranker, rerank)
+import OpenSlop.Capacity (describeCapacity)
+import OpenSlop.Rag.Ask (Asking (..), Selection (..), answerWith, select)
 import OpenSlop.Rag.Retrieve
-import OpenSlop.Rag.Store (Connection, Hit (..), addTurn, openSession, sessionTurns)
+import OpenSlop.Rag.Store (Hit (..), addTurn, openSession, sessionTurns)
 import System.Directory (makeAbsolute)
 import System.IO (hFlush, hIsEOF, stderr, stdin, stdout)
 
-data Asking = Asking
-  { client :: Client
-  , conn :: Connection
-  , embedWith :: Embedder
-  , chatTo :: Chat
-  , capacity :: IORef Capacity
-  , depth :: Int
-  , sources :: Int
-  -- ^ the most sources one answer is given
-  , rerankWith :: Maybe Reranker
-  -- ^ when set, the best 'rerankDepth' candidates are reordered by it;
-  -- without one, candidates are cut by similarity, 'relevanceMargin' below
-  -- their part's best
-  , rerankDepth :: Int
-  , rerankMargin :: Double
-  -- ^ reranked candidates scoring more than this below their part's best
-  -- are dropped
-  , splitQuestions :: Bool
-  -- ^ split a question that may ask several things and search each part
-  , maxWait :: Maybe Double
-  , scope :: IORef [Text]
-  }
-
 say :: Text -> IO ()
 say = TIO.hPutStrLn stderr . ("llmq-index: " <>)
-
--- | The sources chosen for one question, and how they were chosen.
-data Selection = Selection
-  { query :: Text
-  -- ^ the question as searched, after rewriting against the history
-  , searched :: [Text]
-  -- ^ the parts searched separately; the query alone when it was not split
-  , found :: [[Hit]]
-  -- ^ each part's hits from the hybrid search, in its fused order, before
-  -- the reranker's depth cuts them
-  , ranked :: [(Hit, Double)]
-  -- ^ every part's candidates, best first, each scored relative to the
-  -- best candidate of its own part (so each part's best is 0): the
-  -- reranker's score with a reranker, else similarity
-  , kept :: [Hit]
-  -- ^ those within the margin, at most --sources
-  , packed :: [Hit]
-  -- ^ those of 'kept' that fit the model's capacity; what the model is given
-  }
-
--- | Rewrite against the history, split into parts, retrieve and score
--- each part, merge, choose and pack. Returns the sources the model would
--- be given, or why there are none.
---
--- Each part's scores are taken relative to that part's best candidate
--- before the parts are merged, so the margin is applied within each part:
--- a part whose best answer the reranker scores low is not cut because
--- another part's answer scores high. The reranker's depth is shared
--- between the parts, at least 8 each, so a two-part question costs about
--- what one part did.
---
--- Splitting is off unless asked for (llmq-index's --split). Measured on
--- 2026-10-17 over the three evaluation sets, it kept the same 20 of 25
--- answering chunks as searching whole, cost a model call per compound
--- question, and sent more sources, because each part that the files cannot
--- answer still contributes its own best candidates.
---
--- Searching beside the question for the chat model's guess at the
--- answer's text was tried the same day and removed. The model has never
--- seen these repositories, so its guesses were generic code (a
--- `reciprocalRankFusion = 0.5`, JavaScript for a PureScript frontend),
--- each took 7 to 66 seconds on oracle, neither of the two chunks the
--- search misses was found, and interleaving the guess's hits pushed two
--- answers that ranked within --rerank-depth out past it.
-select :: Asking -> [(Text, Text)] -> Text -> IO (Either Text Selection)
-select a history question = do
-  cap <- readIORef a.capacity
-  standalone <- condense a.client a.chatTo cap history question
-  case standalone of
-    Left e -> pure (Left e)
-    Right q -> do
-      when (q /= question) (say ("searching for: " <> q))
-      parts <-
-        if a.splitQuestions && mayHaveParts q
-          then
-            splitParts a.client a.chatTo cap q >>= \case
-              Left e -> say ("not split (" <> e <> "); searching the question whole") >> pure [q]
-              Right ps -> pure ps
-          else pure [q]
-      when (length parts > 1) (say ("searching " <> T.pack (show (length parts)) <> " parts: " <> T.intercalate " | " parts))
-      sc <- readIORef a.scope
-      let depthEach = if length parts > 1 then max 8 (a.rerankDepth `div` length parts) else a.rerankDepth
-      scored <- traverse (scorePart a sc depthEach) parts
-      case sequence scored of
-        Left e -> pure (Left e)
-        Right results
-          | all (null . snd) results -> pure (Left (if null sc then "nothing in the index matches that question" else "nothing under " <> T.intercalate ", " sc <> " matches that question"))
-          | otherwise -> do
-              let found = map fst results
-                  ranked = mergeParts (map snd results)
-                  margin = maybe relevanceMargin (const a.rerankMargin) a.rerankWith
-                  close = [h | (h, s) <- ranked, s >= negate margin]
-                  kept = take a.sources close
-                  packed = packSources cap a.maxWait (historyChars cap a.maxWait history question) kept
-              say
-                ( T.pack (show (length close))
-                    <> " within "
-                    <> T.pack (showFFloat (Just 2) margin "")
-                    <> " of their part's best ("
-                    <> (if isJust a.rerankWith then "--rerank-margin" else "similarity")
-                    <> "), kept "
-                    <> T.pack (show (length kept))
-                    <> " (--sources "
-                    <> T.pack (show a.sources)
-                    <> "), "
-                    <> T.pack (show (length packed))
-                    <> " fit"
-                )
-              pure (Right Selection {query = q, searched = parts, found, ranked, kept, packed})
-
--- | One part's hits from the search, and its candidates best first, scored
--- relative to the best.
-scorePart :: Asking -> [Text] -> Int -> Text -> IO (Either Text ([Hit], [(Hit, Double)]))
-scorePart a sc depthEach part =
-  retrieve a.client a.conn a.embedWith Retrieval {depth = a.depth, limit = 2 * a.depth, scope = sc} part >>= \case
-    Left e -> pure (Left e)
-    Right [] -> pure (Right ([], []))
-    Right hits -> case a.rerankWith of
-      Nothing -> pure (Right (hits, relative (sortOn (Down . snd) [(h, h.similarity) | h <- hits])))
-      Just rr -> do
-        let candidates = take depthEach hits
-        t0 <- getCurrentTime
-        r <- rerank a.client rr part candidates
-        t1 <- getCurrentTime
-        case r of
-          Left e -> pure (Left e)
-          Right scored -> do
-            say
-              ( "reranked the best "
-                  <> T.pack (show (length candidates))
-                  <> " of "
-                  <> T.pack (show (length hits))
-                  <> " for \""
-                  <> T.take 60 part
-                  <> "\" in "
-                  <> T.pack (showFFloat (Just 1) (realToFrac (diffUTCTime t1 t0) :: Double) "")
-                  <> " s, scores "
-                  <> T.intercalate " " [T.pack (showFFloat (Just 2) s "") | (_, s) <- take 6 scored]
-              )
-            pure (Right (hits, relative scored))
-  where
-    relative = \case
-      [] -> []
-      xs@((_, best) : _) -> [(h, s - best) | (h, s) <- xs]
-
--- | The parts' candidates as one list, best first, a chunk found by more
--- than one part kept once with its best score.
-mergeParts :: [[(Hit, Double)]] -> [(Hit, Double)]
-mergeParts perPart = sortOn (Down . snd) (Map.elems (Map.fromListWith better [(key h, (h, s)) | (h, s) <- concat perPart]))
-  where
-    key h = (h.path, h.lineFrom, h.lineTo)
-    better x y = if snd x >= snd y then x else y
-
--- | Ask the model, constrained to the answer schema, with the sources
--- given, and learn from the token count the server reports. The raw reply
--- goes to the callback as it streams.
-answerWith :: Asking -> [(Text, Text)] -> Text -> [Hit] -> (Text -> IO ()) -> IO (Either Text Answer)
-answerWith a history question packed onText = do
-  cap <- readIORef a.capacity
-  r <- try (answerStream a.client a.chatTo cap a.maxWait history question packed onText)
-  case r of
-    Left UserInterrupt -> pure (Left "stopped")
-    Left e -> throwIO e
-    Right (Left e) -> pure (Left e)
-    Right (Right ans) -> do
-      forM_ ans.promptTokens \n -> modifyIORef' a.capacity (\c -> learn c ans.promptChars n)
-      pure (Right ans)
 
 -- | One turn on the terminal: select, then answer with the raw JSON
 -- streaming to stderr, then the rendered answer and its sources.

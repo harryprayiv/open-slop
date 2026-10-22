@@ -1,0 +1,36 @@
+# Ask llmq-index a question from Grace, through open-slop-gateway started
+# with --index, and get the cited answer at a type.
+#
+# The model is the index: "index" for everything it holds, or "index/NAME"
+# for one root (index/cheeblr, index/open-slop). The gateway answers with
+# the same search, reranking and answer schema as llmq-index ask, so what
+# its evaluation sets measured holds here. The type below is exactly the
+# JSON the gateway returns for a request with a response format; a field
+# added or left out here makes Grace refuse the answer.
+#
+# Use it as a function:
+#
+#   let ask = ./stages/index/ask.ffg
+#   in  ask { key, root: "index/open-slop", question: "Which file names the ignore file?" }
+#
+# Labels avoid file, http, https and env, which Grace's lexer reads as the
+# start of an import; that is why the source's path field is called path.
+\args ->
+
+prompt{ key: args.key, model: args.root, text: args.question }
+  : { parts:
+        List
+          { ask: Text
+          , claims: List { claim: Text, sources: List Natural }
+          , gap: Text
+          }
+    , sources:
+        List
+          { cited: Bool
+          , heading: Text
+          , lineFrom: Natural
+          , lineTo: Natural
+          , number: Natural
+          , path: Text
+          }
+    }
