@@ -5,6 +5,8 @@
 -- library and programs. Revised 2026-10-24 after the fixes for O1, O2 and
 -- O3: those three rules and their invariants now describe the code as it
 -- is, and their open questions are closed.
+-- Revised again the same day: IngestRoot covers the Allium
+-- specifications and the chase bundles' annotations.
 --
 -- Scope
 --   Includes: the catalogue and per-request capacity, chunked jobs (llmq),
@@ -346,6 +348,17 @@ rule IngestRoot {
              current content, with every chunk embedded by the active model
     ensures: documents no longer under root, now excluded, oversized or now
              holding a secret are removed
+    ensures: of .inference, only the Allium specifications (*.allium) are
+             indexed, at their own paths and subject to .llmqignore
+    ensures: each run in .inference/.llmqchase gives a fresh chase bundle at
+             .inference/chase/NAME.chase, with its annotations file found at
+             the path given or, failing that, inside .inference
+    @guidance "Specifications and bundles indexed since 2026-10-24. Before,
+               nothing in .inference was indexed, and cheeblr's runs named
+               their annotations files without the .inference prefix, so
+               every bundle was made without annotations. chase also read
+               PureScript in the locale's encoding, so under the POSIX
+               locale ten frontend modules failed to parse."
     @guidance "CODE: no lock. The post-commit hook, a timer and a manual
                llmq-ingest can run the same root at once; two replaceDocument
                calls for one path race on the UNIQUE path, and the loser's

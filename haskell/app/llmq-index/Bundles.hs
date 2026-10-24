@@ -17,15 +17,20 @@
 --         , "annotations": ".inference/backend-chase-annotations.json" }
 --       , { "src": "frontend/src" } ] }
 --
--- Paths are relative to the root, not to .inference, so an annotations
--- file kept in .inference is named ".inference/NAME.json". "tests" left
--- out means chase's own search for test/, tests/ or spec/ beside the
--- source; [] means none.
--- "annotations" left out means none: chase is never left to look for an
--- annotations file, because it looks in its working directory and once
--- attached chase's own file to open-slop's modules (2026-10-17). A listed
--- annotations file that is missing is a warning, and the bundle is made
--- without it.
+-- Paths are relative to the root, so an annotations file kept in
+-- .inference is named ".inference/NAME.json". A bare name that is not at
+-- the root is looked for in .inference as well, because that is where
+-- annotations files are kept: cheeblr's .llmqchase named
+-- "backend-chase-annotations.json" after the file moved, and every bundle
+-- of its backend was made without annotations. "tests" left out means
+-- chase's own search for test/, tests/ or spec/ beside the source; []
+-- means none.
+--
+-- "annotations" left out means none. chase can find a project's
+-- .inference/chase-annotation.json by itself, but a repository with
+-- several runs keeps one annotations file per run under its own name, so
+-- each run names its file. A listed annotations file that is found in
+-- neither place is a warning, and the bundle is made without it.
 --
 -- ============================================================================
 -- WHY HERE AND NOT BEFOREHAND
@@ -63,6 +68,7 @@ module Bundles
   ) where
 
 import Control.Exception (SomeException, try)
+import Control.Monad (filterM)
 import Data.Aeson (FromJSON (..), withObject, (.:), (.:?))
 import Data.Aeson qualified as Aeson
 import Data.ByteString.Lazy qualified as BL
@@ -137,11 +143,11 @@ makeBundle root out r = do
       (annArgs, annWarn) <- case r.annotations of
         Nothing -> pure (["--no-annotations"], [])
         Just a -> do
-          there <- doesFileExist (root </> a)
-          pure
-            if there
-              then (["-a", root </> a], [])
-              else (["--no-annotations"], [T.pack a <> " is missing; the bundle has no annotations"])
+          let candidates = [root </> a, root </> inferenceDir </> a]
+          found <- filterM doesFileExist candidates
+          pure case found of
+            (f : _) -> (["-a", f], [])
+            [] -> (["--no-annotations"], [T.pack a <> " is in neither " <> T.pack root <> " nor its " <> T.pack inferenceDir <> "; the bundle has no annotations"])
       let testArgs = case r.tests of
             Nothing -> []
             Just [] -> ["--no-tests"]

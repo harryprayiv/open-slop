@@ -271,6 +271,7 @@ instructions =
     , "Only state what a source says. If the sources do not answer a part, give it no claims and say what is missing in its gap; do not guess."
     , "A source that is documentation (a .md, .txt, .org or .rst file, or a README) describes the code as it was when it was written and can be out of date. When it disagrees with a source that is code, the code is right."
     , "A source whose path ends in .chase is a summary of code: its signatures and types are exact, but its notes (lines starting with !, >, ? or %) were written by hand or by a model and can be out of date. When it disagrees with a source that is code, the code is right."
+    , "A source whose path ends in .allium is a specification: its rules say what the code is meant to do, and a line starting with @guidance \"CODE:\" says where the code differs. It was written by hand or by a model and can be out of date. When it disagrees with a source that is code, the code is what runs."
     , "Earlier turns of the conversation are context, not sources."
     ]
 

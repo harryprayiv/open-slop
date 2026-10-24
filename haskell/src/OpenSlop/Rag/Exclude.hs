@@ -32,9 +32,12 @@
 -- Everything a repository holds for the LLM tooling lives in one directory
 -- at its root, .inference: the ignore file, the chase runs (see Bundles in
 -- llmq-index), and whatever annotations those runs name. The files keep
--- their names, .llmqignore and .llmqchase. Ingest never walks into
--- .inference, as it walks into no directory whose name starts with a dot,
--- so nothing kept there for the tools becomes a source in the index.
+-- their names, .llmqignore and .llmqchase. Ingest does not walk into
+-- .inference, as it walks into no directory whose name starts with a dot.
+-- The one exception is the Allium specifications kept there
+-- (.inference/*.allium), which ingest indexes beside the files, still
+-- subject to the patterns; nothing else kept there for the tools becomes
+-- a source in the index.
 --
 -- Until 2026-10-24 the two files were at the root itself. A root that
 -- still has either there is refused by ingest with a message naming the

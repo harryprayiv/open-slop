@@ -6,6 +6,9 @@
 -- PDFs go through pdftotext, and each page becomes a "Page n" heading, so a
 -- citation names the page.
 --
+-- An .allium file is a specification of what the code should do (rules,
+-- invariants, and where the code differs from them), read as it is.
+--
 -- A .chase bundle (from chase, the structural compressor for Haskell and
 -- PureScript) is split per module: each "=== BEGIN path ===" line becomes a
 -- heading naming the module's file, and each "=== END ... ===" line a blank
@@ -47,6 +50,8 @@ data Kind
   | Pdf
   | Chase
   -- ^ a chase bundle: signatures, types and annotations, no bodies
+  | Allium
+  -- ^ an Allium specification of the code's intended behaviour
   deriving stock (Eq, Show)
 
 kindName :: Kind -> Text
@@ -57,6 +62,7 @@ kindName = \case
   Converted r -> "pandoc:" <> r
   Pdf -> "pdf"
   Chase -> "chase"
+  Allium -> "allium"
 
 -- | How a kind's text is split. Markdown and everything converted to it
 -- has headings; in code and plain text a "# " line is a comment.
@@ -68,6 +74,7 @@ structureOf = \case
   Chase -> Headed
   PlainText -> Flat
   Code -> Flat
+  Allium -> Flat
 
 classify :: FilePath -> Maybe Kind
 classify path = case map toLower (takeExtension path) of
@@ -84,6 +91,7 @@ classify path = case map toLower (takeExtension path) of
   ".tex" -> Just (Converted "latex")
   ".pdf" -> Just Pdf
   ".chase" -> Just Chase
+  ".allium" -> Just Allium
   e | e `elem` codeExtensions -> Just Code
   "" | takeFileName path `elem` ["README", "LICENSE", "Makefile", "Justfile"] -> Just PlainText
   _ -> Nothing

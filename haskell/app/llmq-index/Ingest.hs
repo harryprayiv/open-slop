@@ -12,6 +12,14 @@
 -- A root with a .inference/.llmqchase file also gets chase bundles of its code, made
 -- in the same run from the same tree and indexed beside the files; see
 -- Bundles.
+--
+-- The walk does not go into .inference, but the Allium specifications kept
+-- there (.inference/*.allium) are indexed with the files, under their own
+-- paths: a specification says what the code is meant to do and where it
+-- differs, which is context a question about the code needs. Nothing else
+-- in .inference is indexed: the bundles kept there are old runs, replaced
+-- by the ones made in this run, and the annotations files are already in
+-- those bundles.
 module Ingest
   ( IngestOpts (..)
   , ingestRoot
@@ -32,11 +40,11 @@ import Data.Text.IO qualified as TIO
 import Extract (classify, extract, kindName, skipDir, structureOf)
 import OpenSlop.Http (Client)
 import OpenSlop.Rag.Embed (Embedder (..), Purpose (ForDocument), embed)
-import OpenSlop.Rag.Exclude (Pattern, excluded, ignoreFile, legacyFiles, parsePatterns, readIgnoreFile, secretKind)
+import OpenSlop.Rag.Exclude (Pattern, excluded, ignoreFile, inferenceDir, legacyFiles, parsePatterns, readIgnoreFile, secretKind)
 import OpenSlop.Rag.Split (SplitConfig (..), defaultSplit, embedText, split)
 import OpenSlop.Rag.Store (Connection, DocState (..), Document (..), docState, ensureIndex, removeMissing, replaceDocument)
 import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist, getFileSize, listDirectory, pathIsSymbolicLink)
-import System.FilePath ((</>))
+import System.FilePath (takeExtension, (</>))
 import System.IO (stderr)
 import System.IO.Temp (withSystemTempDirectory)
 
@@ -78,6 +86,25 @@ walk patterns root = go []
           )
           names
       pure (concatMap fst results, sum (map snd results))
+
+-- | The Allium specifications in a root's .inference directory, as paths,
+-- with any the patterns exclude left out. Links are not followed.
+specFiles :: [Pattern] -> FilePath -> IO [FilePath]
+specFiles patterns root = do
+  let dir = root </> inferenceDir
+  there <- doesDirectoryExist dir
+  names <- if there then sort <$> listDirectory dir else pure []
+  fmap concat . forM names $ \n -> do
+    let p = dir </> n
+    link <- pathIsSymbolicLink p
+    isFile <- doesFileExist p
+    pure
+      [ p
+      | not link
+      , isFile
+      , takeExtension n == ".allium"
+      , not (excluded patterns [T.pack inferenceDir, T.pack n] False)
+      ]
 
 -- | One thing to index: where to read it, and the path it is stored
 -- under. For a file those are the same; for a bundle the first is a
@@ -125,7 +152,9 @@ ingestLaidOut :: Client -> Connection -> Embedder -> IngestOpts -> FilePath -> I
 ingestLaidOut client conn e o root = do
   fromFile <- readIgnoreFile root
   let patterns = fromFile <> parsePatterns o.excludes
-  (files, excludedPaths) <- walk patterns root
+  (walked, excludedPaths) <- walk patterns root
+  specs <- specFiles patterns root
+  let files = walked <> specs
   say
     ( T.pack root
         <> ": "
@@ -138,7 +167,10 @@ ingestLaidOut client conn e o root = do
         <> T.pack ignoreFile
         <> " and "
         <> T.pack (show (length o.excludes))
-        <> " from --exclude"
+        <> " from --exclude, "
+        <> T.pack (show (length specs))
+        <> " specifications from "
+        <> T.pack inferenceDir
     )
   -- The bundles are read inside the temporary directory's lifetime, so
   -- everything is indexed within it.
