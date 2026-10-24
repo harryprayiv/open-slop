@@ -27,8 +27,8 @@
         {
           "path": "src/OpenSlop/Rag/Exclude.hs",
           "contains": [
-            "ignoreFile = \".llmqignore\"",
-            "root's .llmqignore file"
+            "ignoreFile = inferenceDir </> \".llmqignore\"",
+            "root's .inference/.llmqignore file"
           ]
         }
       ]

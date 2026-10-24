@@ -6,9 +6,10 @@
 -- one transaction, so a crash mid-run leaves every file either at its old
 -- state or its new one. Files that have gone from a root, or that are now
 -- excluded (see "OpenSlop.Rag.Exclude"), are removed at the end of a run
--- over it.
+-- over it. A root that still keeps .llmqignore or .llmqchase at its top,
+-- not in .inference, is refused before anything is read or removed.
 --
--- A root with a .llmqchase file also gets chase bundles of its code, made
+-- A root with a .inference/.llmqchase file also gets chase bundles of its code, made
 -- in the same run from the same tree and indexed beside the files; see
 -- Bundles.
 module Ingest
@@ -16,8 +17,8 @@ module Ingest
   , ingestRoot
   ) where
 
-import Bundles (ChaseRun (..), bundleName, makeBundle, readChaseRuns)
-import Control.Monad (foldM, forM, forM_, unless)
+import Bundles (ChaseRun (..), bundleDir, bundleName, makeBundle, readChaseRuns)
+import Control.Monad (filterM, foldM, forM, forM_, unless)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as B
 import Data.ByteString.Base16 qualified as B16
@@ -31,10 +32,10 @@ import Data.Text.IO qualified as TIO
 import Extract (classify, extract, kindName, skipDir, structureOf)
 import OpenSlop.Http (Client)
 import OpenSlop.Rag.Embed (Embedder (..), Purpose (ForDocument), embed)
-import OpenSlop.Rag.Exclude (Pattern, excluded, ignoreFile, parsePatterns, readIgnoreFile, secretKind)
+import OpenSlop.Rag.Exclude (Pattern, excluded, ignoreFile, legacyFiles, parsePatterns, readIgnoreFile, secretKind)
 import OpenSlop.Rag.Split (SplitConfig (..), defaultSplit, embedText, split)
 import OpenSlop.Rag.Store (Connection, DocState (..), Document (..), docState, ensureIndex, removeMissing, replaceDocument)
-import System.Directory (canonicalizePath, doesDirectoryExist, getFileSize, listDirectory, pathIsSymbolicLink)
+import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist, getFileSize, listDirectory, pathIsSymbolicLink)
 import System.FilePath ((</>))
 import System.IO (stderr)
 import System.IO.Temp (withSystemTempDirectory)
@@ -46,7 +47,7 @@ data IngestOpts = IngestOpts
   , target :: Int
   , dryRun :: Bool
   , excludes :: [Text]
-  -- ^ patterns from --exclude, added to the root's .llmqignore
+  -- ^ patterns from --exclude, added to the root's .inference/.llmqignore
   }
 
 say :: Text -> IO ()
@@ -80,10 +81,10 @@ walk patterns root = go []
 
 -- | One thing to index: where to read it, and the path it is stored
 -- under. For a file those are the same; for a bundle the first is a
--- temporary file and the second ROOT/.chase/NAME.chase.
+-- temporary file and the second ROOT/.inference/chase/NAME.chase.
 data Entry = Entry {readFrom :: FilePath, storedAs :: FilePath}
 
--- | The bundles a root's .llmqchase asks for, made into the directory
+-- | The bundles a root's .inference/.llmqchase asks for, made into the directory
 -- given. A run chase cannot make is reported and has no entry, so its
 -- earlier bundle is removed at the end of the run instead of describing
 -- code that has since changed.
@@ -99,13 +100,29 @@ chaseBundles root tmp =
           pure []
         Right warnings -> do
           forM_ warnings \w -> say ("chase, " <> T.pack r.src <> ": " <> w)
-          pure [Entry {readFrom = out, storedAs = root </> ".chase" </> bundleName r}]
+          pure [Entry {readFrom = out, storedAs = root </> bundleDir </> bundleName r}]
 
 data Tally = Tally {fresh :: Int, written :: Int, skipped :: Int, failed :: Int, secrets :: Int, chunks :: Int}
 
 ingestRoot :: Client -> Connection -> Embedder -> IngestOpts -> FilePath -> IO ()
 ingestRoot client conn e o dir = do
   root <- canonicalizePath dir
+  stale <- filterM (\(old, _) -> doesFileExist (root </> old)) legacyFiles
+  if null stale
+    then ingestLaidOut client conn e o root
+    else
+      forM_ stale \(old, new) ->
+        say
+          ( T.pack root
+              <> ": not ingested: "
+              <> T.pack old
+              <> " is read from "
+              <> T.pack new
+              <> " now; move it there and run again"
+          )
+
+ingestLaidOut :: Client -> Connection -> Embedder -> IngestOpts -> FilePath -> IO ()
+ingestLaidOut client conn e o root = do
   fromFile <- readIgnoreFile root
   let patterns = fromFile <> parsePatterns o.excludes
   (files, excludedPaths) <- walk patterns root
@@ -128,14 +145,14 @@ ingestRoot client conn e o dir = do
   withSystemTempDirectory "llmq-chase" \tmp -> do
     bundles <- chaseBundles root tmp
     unless (null bundles) (say (T.pack root <> ": " <> T.pack (show (length bundles)) <> " chase bundles made"))
-    indexAll root ([Entry f f | f <- files] <> bundles)
+    indexAll ([Entry f f | f <- files] <> bundles)
   where
     cfg = defaultSplit {target = o.target, hardLimit = max o.target (o.target * 3 `div` 2)}
 
-    indexAll root entries = do
+    indexAll entries = do
       indexed <- newIORef False
       seen <- newIORef []
-      t <- foldM (indexOne root indexed seen) (Tally 0 0 0 0 0 0) entries
+      t <- foldM (indexOne indexed seen) (Tally 0 0 0 0 0 0) entries
       removed <-
         if o.dryRun
           then pure (0 :: Int64)
@@ -159,7 +176,7 @@ ingestRoot client conn e o dir = do
             <> " removed"
         )
 
-    indexOne root indexed seen t entry = case classify entry.readFrom of
+    indexOne indexed seen t entry = case classify entry.readFrom of
       Nothing -> pure t {skipped = t.skipped + 1}
       Just kind -> do
         size <- getFileSize entry.readFrom

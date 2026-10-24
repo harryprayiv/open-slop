@@ -3,9 +3,9 @@
 --
 --   llmq-index init                       create the tables
 --   llmq-index ingest DIR...              walk, extract, split, embed, store;
---                                         each DIR's .llmqignore and --exclude
---                                         leave paths out, and secrets are
---                                         never indexed; see
+--                                         each DIR's .inference/.llmqignore
+--                                         and --exclude leave paths out, and
+--                                         secrets are never indexed; see
 --                                         "OpenSlop.Rag.Exclude"
 --   llmq-index search QUESTION            the hits, with scores and sources
 --   llmq-index ask QUESTION               one cited answer, streamed

@@ -122,13 +122,13 @@ in
 
     # chase is taken from its own flake, as tricorder is, and only where
     # llmq-index ingests: building it builds Grace and ghc-lib-parser, which
-    # no Pi row should have to. Without it, a root's .llmqchase finds chase on PATH or
-    # makes no bundles, and says so.
+    # no Pi row should have to. Without it, a root's .inference/.llmqchase
+    # finds chase on PATH or makes no bundles, and says so.
     chase = lib.mkOption {
       type = types.nullOr types.package;
       default = null;
       example = lib.literalExpression "inputs.chase.packages.\${pkgs.system}.chase";
-      description = "chase, which llmq-index ingest runs over a root that has a .llmqchase file, so the index holds bundles made from the same code. Unset means whatever chase is on PATH.";
+      description = "chase, which llmq-index ingest runs over a root that has a .inference/.llmqchase file, so the index holds bundles made from the same code. Unset means whatever chase is on PATH.";
     };
 
     keyFile = lib.mkOption {

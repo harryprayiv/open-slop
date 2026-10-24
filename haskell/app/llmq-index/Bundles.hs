@@ -7,18 +7,20 @@
 -- how modules fit together can then be answered from one chunk per module
 -- instead of several chunks of code.
 --
--- A root asks for bundles with a .llmqchase file at its top, committed with
+-- A root asks for bundles with a .inference/.llmqchase file, committed with
 -- the code, because which trees to compress and where their tests and
 -- annotations are is a fact about that repository:
 --
 --   { "runs":
 --       [ { "src": "backend/src"
 --         , "tests": ["backend/test"]
---         , "annotations": "backend-chase-annotations.json" }
+--         , "annotations": ".inference/backend-chase-annotations.json" }
 --       , { "src": "frontend/src" } ] }
 --
--- Paths are relative to the root. "tests" left out means chase's own
--- search for test/, tests/ or spec/ beside the source; [] means none.
+-- Paths are relative to the root, not to .inference, so an annotations
+-- file kept in .inference is named ".inference/NAME.json". "tests" left
+-- out means chase's own search for test/, tests/ or spec/ beside the
+-- source; [] means none.
 -- "annotations" left out means none: chase is never left to look for an
 -- annotations file, because it looks in its working directory and once
 -- attached chase's own file to open-slop's modules (2026-10-17). A listed
@@ -38,11 +40,12 @@
 -- still be out of date, and chase's drift warnings, printed here, say
 -- when one names something the code no longer has.
 --
--- A bundle is stored as ROOT/.chase/NAME.chase, a path under the root that
--- no file has, so the run's removal of vanished files keeps it, a re-run
--- with unchanged code finds the same hash and skips it, and when chase
--- fails or a run is removed from .llmqchase the old bundle is removed from
--- the index rather than left to describe code that changed.
+-- A bundle is stored as ROOT/.inference/chase/NAME.chase. Ingest never
+-- walks into .inference, so no file in the walk has that path: the run's
+-- removal of vanished files keeps the bundle, a re-run with unchanged code
+-- finds the same hash and skips it, and when chase fails or a run is
+-- removed from .llmqchase the old bundle is removed from the index rather
+-- than left to describe code that changed.
 --
 -- chase is found at $OPEN_SLOP_CHASE, which the home-manager module sets
 -- when programs.llmq.chase is given, or on PATH.
@@ -53,6 +56,7 @@
 module Bundles
   ( ChaseRun (..)
   , chaseFile
+  , bundleDir
   , readChaseRuns
   , bundleName
   , makeBundle
@@ -68,6 +72,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Encoding.Error qualified as TE
+import OpenSlop.Rag.Exclude (inferenceDir)
 import System.Directory (doesDirectoryExist, doesFileExist)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
@@ -90,10 +95,15 @@ newtype Runs = Runs [ChaseRun]
 instance FromJSON Runs where
   parseJSON = withObject ".llmqchase" \o -> Runs <$> o .: "runs"
 
+-- | The chase runs file, relative to the root.
 chaseFile :: FilePath
-chaseFile = ".llmqchase"
+chaseFile = inferenceDir </> ".llmqchase"
 
--- | The root's runs: none without a .llmqchase file, an error when the
+-- | Where bundles are stored in the index, relative to the root.
+bundleDir :: FilePath
+bundleDir = inferenceDir </> "chase"
+
+-- | The root's runs: none without a .inference/.llmqchase file, an error when the
 -- file is there and is not the expected shape.
 readChaseRuns :: FilePath -> IO (Either Text [ChaseRun])
 readChaseRuns root = do

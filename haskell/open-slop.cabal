@@ -286,3 +286,18 @@ test-suite open-slop-test
     tasty-hunit,
     tasty-quickcheck,
     text
+
+test-suite open-slop-probes
+  import:          shared
+  type:            exitcode-stdio-1.0
+  hs-source-dirs:  test
+  main-is:         ProbeMain.hs
+  other-modules:   Probe
+  ghc-options:     -threaded
+  build-depends:
+    open-slop,
+    async,
+    directory,
+    filepath,
+    tasty,
+    tasty-hunit

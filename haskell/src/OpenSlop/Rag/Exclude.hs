@@ -2,8 +2,8 @@
 --
 -- Two kinds of exclusion, checked in this order:
 --
---   1. Paths. Glob patterns from the root's .llmqignore file and from
---      --exclude, in the shape of a .gitignore: a pattern with no slash
+--   1. Paths. Glob patterns from the root's .inference/.llmqignore file
+--      and from --exclude, in the shape of a .gitignore: a pattern with no slash
 --      matches a file or directory name at any depth ("nerd.nix",
 --      "*.json"), a pattern with a slash matches from the root
 --      ("modules/home/glyphs/nerd.nix", "docs/old/**"), a trailing slash
@@ -24,10 +24,29 @@
 --
 -- A file that is excluded and was indexed by an earlier run is removed at
 -- the end of the run, like a file that was deleted.
+--
+-- ============================================================================
+-- THE .inference DIRECTORY
+-- ============================================================================
+--
+-- Everything a repository holds for the LLM tooling lives in one directory
+-- at its root, .inference: the ignore file, the chase runs (see Bundles in
+-- llmq-index), and whatever annotations those runs name. The files keep
+-- their names, .llmqignore and .llmqchase. Ingest never walks into
+-- .inference, as it walks into no directory whose name starts with a dot,
+-- so nothing kept there for the tools becomes a source in the index.
+--
+-- Until 2026-10-24 the two files were at the root itself. A root that
+-- still has either there is refused by ingest with a message naming the
+-- move, rather than indexed without its exclusions: an ignore file that is
+-- silently no longer read puts the evaluation sets back in the index,
+-- where on 2026-10-17 they ranked first for their own questions.
 module OpenSlop.Rag.Exclude
   ( Pattern
   , parsePatterns
+  , inferenceDir
   , ignoreFile
+  , legacyFiles
   , readIgnoreFile
   , excluded
   , secretKind
@@ -64,10 +83,24 @@ parsePatterns = concatMap one
                   anchored = "/" `T.isInfixOf` body || "/" `T.isPrefixOf` t || length segments > 1
                in [Pattern {anchored, dirOnly, segments} | not (null segments)]
 
-ignoreFile :: FilePath
-ignoreFile = ".llmqignore"
+-- | The directory at a root that holds the LLM tooling's files.
+inferenceDir :: FilePath
+inferenceDir = ".inference"
 
--- | The root's .llmqignore, or no patterns when there is none.
+-- | The ignore file, relative to the root.
+ignoreFile :: FilePath
+ignoreFile = inferenceDir </> ".llmqignore"
+
+-- | Where the ignore file and the chase runs were kept before
+-- .inference, and where they are now, relative to the root. Ingest
+-- refuses a root that has a file at an old place.
+legacyFiles :: [(FilePath, FilePath)]
+legacyFiles =
+  [ (".llmqignore", ignoreFile)
+  , (".llmqchase", inferenceDir </> ".llmqchase")
+  ]
+
+-- | The root's .inference/.llmqignore, or no patterns when there is none.
 readIgnoreFile :: FilePath -> IO [Pattern]
 readIgnoreFile root = do
   r <- try @IOException (TIO.readFile (root </> ignoreFile))

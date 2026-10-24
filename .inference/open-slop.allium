@@ -1,0 +1,474 @@
+-- allium: 3
+-- open-slop.allium
+--
+-- Distilled from open-slop, branch main (5807f7a, 2026-10-22), the Haskell
+-- library and programs.
+--
+-- Scope
+--   Includes: the catalogue and per-request capacity, chunked jobs (llmq),
+--             the gateway (keys, routing, the record sink, the index as a
+--             model, the web page's ask queue), the index (ingest, search,
+--             cited answers, sessions), the agent's workspace and actions.
+--   Excludes: llmq-bench's measurement protocol, llmq-models' TUI, Grace
+--             stage typing, chase itself, the PureScript page's rendering,
+--             the NixOS modules.
+--
+-- How to read this file
+--   Rules describe what the system should do. Where main does something
+--   else, the rule carries an `@guidance` line beginning "CODE:" saying
+--   what it does now, and the issue is repeated as an open question at the
+--   bottom. Invariants marked VIOLATED are ones main can be driven to
+--   break. Probe ids (O1..O3) refer to haskell/test/Probe.hs.
+
+----------------------------------------------------------------------
+-- External entities
+----------------------------------------------------------------------
+
+external entity ModelServer {
+    engine: llama_server | ollama | hailo_ollama
+    url: String
+    serves_one_at_a_time: Boolean
+    accepts_schema: Boolean
+    reported_window: Integer?
+}
+
+external entity EmbeddingServer { model: String }
+
+external entity Reranker { model: String }
+
+----------------------------------------------------------------------
+-- Value types
+----------------------------------------------------------------------
+
+value Budget {
+    ctx: Integer
+    predict: Integer
+    chunk_bytes: Integer
+    bytes_per_token: Decimal
+    temperature: Decimal?
+}
+
+value Capacity {
+    window: Integer
+    chars_per_token: Decimal
+    prefill_tok_per_sec: Decimal?
+    decode_tok_per_sec: Decimal?
+}
+
+----------------------------------------------------------------------
+-- Entities
+----------------------------------------------------------------------
+
+entity CatalogueBackend {
+    engine: String
+    ctx: Integer
+    predict: Integer
+    chars_per_token: Decimal
+    models: CatalogueModel with backend = this
+}
+
+entity CatalogueModel {
+    backend: CatalogueBackend
+    name: String
+    ctx: Integer?
+    predict: Integer?
+}
+
+entity Job {
+    model: String
+    budget: Budget
+    per_file: Boolean
+    instruction: String
+    input: String
+    id: digest(model, budget, per_file, instruction, input)
+    parts: JobPart with job = this
+    status: building | open | assembled
+
+    transitions status {
+        building -> open
+        open -> assembled
+        terminal: assembled
+    }
+}
+
+entity JobPart {
+    job: Job
+    index: Integer
+    status: pending | done
+    transitions status { pending -> done; terminal: done }
+}
+
+entity ApiKey {
+    owner: String
+    digest: String
+}
+
+entity IndexedDocument {
+    root: String
+    path: String
+    sha256: String
+    chunks: Chunk with document = this
+}
+
+entity Chunk {
+    document: IndexedDocument
+    ordinal: Integer
+    heading: String
+    body: String
+    line_from: Integer
+    line_to: Integer
+    embeddings: Map<String, Vector>
+}
+
+entity Session {
+    name: String
+    turns: Turn with session = this
+}
+
+entity Turn {
+    session: Session
+    role: user | assistant
+    content: String
+    answer: CitedAnswer? when role = assistant
+}
+
+value CitedAnswer {
+    parts: List<AnswerPart>
+    sources: List<Source>
+}
+
+value AnswerPart {
+    ask: String
+    claims: List<CitedClaim>
+    gap: String
+}
+
+value CitedClaim {
+    claim: String
+    sources: List<Integer>
+}
+
+entity AskJob {
+    session: Session
+    model: String
+    question: String
+    submitted: Timestamp
+    status: queued | searching | answering | done | failed
+    transitions status {
+        queued -> searching
+        searching -> answering
+        searching -> done
+        searching -> failed
+        answering -> done
+        answering -> failed
+        terminal: done, failed
+    }
+}
+
+entity Workspace {
+    root: String
+}
+
+----------------------------------------------------------------------
+-- Config
+----------------------------------------------------------------------
+
+config {
+    listing_cache: Duration = 30.seconds
+    max_chat_body_bytes: Integer = 8388608
+    max_ask_body_bytes: Integer = 65536
+    finished_ask_kept_for: Duration = 1.hour
+    max_queued_asks: Integer = deferred
+    relevance_margin: Decimal = 0.08
+    answer_room_fraction: Decimal = 0.25
+    answer_room_min_tokens: Integer = 512
+}
+
+----------------------------------------------------------------------
+-- Rules: capacity
+----------------------------------------------------------------------
+
+rule WindowForRequest {
+    when: CapacityNeeded(server, backend, model)
+    let configured = model.ctx ?? backend.ctx
+    ensures: window = min(server.reported_window ?? configured, configured)
+             when server.engine != llama_server
+    ensures: window = server.reported_window ?? configured
+             when server.engine = llama_server
+    @guidance "llama-server's n_ctx is the allocation itself, so it wins. On
+               every other engine the catalogue's ctx (the model's, else the
+               backend's) is the most the operator allows on this hardware."
+    @guidance "CODE: hailo-ollama takes probeWindow's fixed 2048 as the
+               window and never applies the catalogue (O1). llama3.2:3b's
+               ctx 896 on hailo is ignored; a request sized for 2048 tokens
+               overruns what that HEF holds."
+}
+
+rule LearnCharsPerToken {
+    when: ServerCountedPrompt(capacity, chars, tokens)
+    requires: tokens >= 32 and chars >= 64
+    requires: chars / tokens within [0.5, 2] * capacity.chars_per_token
+    ensures: capacity.chars_per_token = blend(capacity.chars_per_token, chars / tokens)
+    @guidance "CODE: matches."
+}
+
+----------------------------------------------------------------------
+-- Rules: chunked jobs (llmq)
+----------------------------------------------------------------------
+
+rule CreateJob {
+    when: JobRequested(model, budget, per_file, instruction, input)
+    let id = digest(model, budget, per_file, instruction, input)
+    ensures: exactly one Job with this id exists, whole, whatever the number
+             of concurrent requests for it
+    ensures: the request gets that Job, or a clear refusal while another
+             process is building it
+    @guidance "CODE: create checks meta.json, then removes and rebuilds
+               <id>.building with no lock. Concurrent creates delete each
+               other's half-built directory and fail with removePathForcibly
+               and withFile errors (O3: 7 of 8 failed). The job lock exists
+               only after the job does."
+}
+
+rule RunPart {
+    when: RunnerTakesPart(job, part)
+    requires: runner holds job's lock
+    requires: part.status = pending
+    ensures: part.status = done only after its text and stats are both
+             written
+    @guidance "CODE: matches: stats first, text renamed into place last."
+}
+
+rule AssembleJob {
+    when: AllPartsDone(job)
+    requires: job.parts.all(p => p.status = done)
+    ensures: job.status = assembled
+    @guidance "CODE: matches."
+}
+
+----------------------------------------------------------------------
+-- Rules: the gateway
+----------------------------------------------------------------------
+
+rule Authenticate {
+    when: ApiRequest(request)
+    requires: request.path not in {healthz, page files}
+    requires: exists ApiKey where digest = sha256(bearer(request))
+    @guidance "CODE: matches; keys are stored as digests."
+}
+
+rule BoundedBody {
+    when: ApiRequest(request)
+    requires: bytes_read(request) <= limit_for(request.path)
+    @guidance "The limit is enforced while reading: reading stops at the
+               limit plus one byte."
+    @guidance "CODE: strictRequestBody reads the whole body into memory and
+               then compares its length with 8 MB (chat) or 64 KB (asks). A
+               key holder can send a body as large as memory allows."
+}
+
+rule ChatToBackend {
+    when: KeyHolderChats(key, request)
+    requires: request.model resolves to a served model
+    ensures: the request is translated for its engine and sent
+    ensures: a schema-constrained reply that stopped at the token cap is a
+             refusal naming the cap
+    ensures: one record per request when a record sink is configured
+    @guidance "CODE: matches."
+}
+
+rule AskIndexOneAtATime {
+    when: IndexWorkRequested(source, question)
+    requires: source in {web_ask_job, chat_completion_to_index}
+    ensures: the work runs only when no other index work is running, in
+             submission order
+    @guidance "The Asks module documents why: the servers behind the index
+               serve one request at a time and llama-server keeps one prompt
+               cache; interleaving two questions turned a 75-second call
+               into a 2,000-second one (2026-10-21)."
+    @guidance "CODE: only the page's jobs are queued. A POST
+               /v1/chat/completions with model index or index/NAME (Grace,
+               llmq, any client) runs immediately on the request thread, in
+               parallel with whatever job the queue is running."
+}
+
+rule SubmitAsk {
+    when: KeyHolderSubmitsAsk(key, session_name, model, question)
+    requires: question and session_name are not blank
+    requires: model is index or index/NAME of an indexed root
+    requires: queued_count() < config.max_queued_asks
+    ensures: AskJob.created(status: queued)
+    @guidance "CODE: no bound on queued jobs; each takes three to five
+               minutes on oracle. Jobs live only in memory: a gateway
+               restart loses every queued and running job, and the page
+               then reports 'never submitted, or ended more than an hour
+               ago'."
+}
+
+rule FinishAsk {
+    when: job: AskJob transitions_to done
+    ensures: the user turn and the assistant turn with its CitedAnswer are
+             stored in job.session together
+    @guidance "CODE: two separate inserts; a failure between them leaves a
+               question with no answer in the session."
+}
+
+rule ForgetFinishedAsk {
+    when: job: AskJob.ended_at + config.finished_ask_kept_for <= now
+    requires: job.status in {done, failed}
+    ensures: not exists job
+    @guidance "CODE: old jobs are pruned only when a new job is submitted,
+               so with no new submissions a finished job is reported for
+               ever."
+}
+
+rule AskRunnerSurvives {
+    when: AskRunnerFails(error)
+    ensures: the failing job is marked failed and the runner continues with
+             the next job
+    @guidance "CODE: answer's exceptions are caught, but the runner thread is
+               a bare forkIO; an exception outside that try (an async
+               exception, an IORef or logging failure) ends the thread, and
+               every later job stays queued with nothing to say why."
+}
+
+----------------------------------------------------------------------
+-- Rules: the index
+----------------------------------------------------------------------
+
+rule IngestRoot {
+    when: IngestRequested(root)
+    requires: no other ingest of root is running
+    ensures: every indexable, non-secret file under root is stored at its
+             current content, with every chunk embedded by the active model
+    ensures: documents no longer under root, now excluded, oversized or now
+             holding a secret are removed
+    @guidance "CODE: no lock. The post-commit hook, a timer and a manual
+               llmq-ingest can run the same root at once; two replaceDocument
+               calls for one path race on the UNIQUE path, and the loser's
+               exception ends its whole run."
+}
+
+rule ReplaceDocument {
+    when: DocumentChanged(path, model)
+    ensures: the document's chunks and this model's vectors are replaced in
+             one transaction
+    ensures: vectors of other embedding models for unchanged chunks are kept
+    @guidance "CODE: NeedsEmbeddings (same content, this model's vectors
+               missing) goes through replaceDocument, which deletes the
+               document and every model's vectors. With two embedding models
+               each ingest wipes the other's, so they alternate for ever."
+}
+
+rule AnswerFromSources {
+    when: IndexAnswerRequested(history, question)
+    let hits = relevant(rerank(retrieve(question)))
+    requires: hits.count > 0
+    ensures: the reply is a CitedAnswer whose every source number names a
+             source that was sent
+    ensures: a reply citing a number outside 1..hits.count is refused or
+             repaired, never returned with the number in its claims
+    @guidance "Nothing in scope matching is an answer with one unanswered
+               part; any server failure is an error, never an empty answer."
+    @guidance "CODE: under a schema the enum makes out-of-range numbers
+               unsampleable, but decodeAnswer keeps them in the claims and
+               only lists them as 'invented'; answerValue and answerText
+               show them. hailo-ollama accepts no schema, so an index chat
+               model on hailo would return them."
+    @guidance "CODE: 'nothing matched' is told apart from a failure by
+               select's message starting with 'nothing ', in two places;
+               any reworded message turns an outage into an empty answer or
+               the reverse."
+}
+
+rule ReadSessions {
+    when: KeyHolderReadsSessions(key)
+    ensures: the sessions listed are the key owner's
+    @guidance "CODE: every key reads and continues every session; keys name
+               an owner for the log but sessions have none."
+}
+
+----------------------------------------------------------------------
+-- Rules: the agent's workspace
+----------------------------------------------------------------------
+
+rule ResolvePath {
+    when: ModelNamesPath(workspace, given)
+    requires: given is relative and has no '..'
+    requires: given is not under .git and is not .tricorder.yaml
+    requires: the real location of given, following every symbolic link
+              along it including the last component whether or not its
+              target exists, is under workspace.root
+    ensures: the resolved path is the only path read or written
+    @guidance "CODE: the existing-ancestor walk uses doesPathExist, which is
+               False for a dangling link, so a link whose target is missing
+               anchors on its directory and passes (O2). WriteFile then
+               creates the target outside the project. A repository can
+               ship such a link."
+    @guidance "Only .tricorder.yaml is protected among files whose contents
+               run as commands. .envrc (direnv), Setup.hs, cabal.project
+               (build-tool-depends, source-repository-package), flake.nix
+               and git hooks under .github are writable by the model."
+}
+
+----------------------------------------------------------------------
+-- Invariants
+----------------------------------------------------------------------
+
+invariant WindowWithinCatalogue {
+    -- VIOLATED on hailo-ollama (O1).
+    all requests r: r.engine = llama_server or r.window <= r.model_ctx ?? r.backend_ctx
+}
+
+invariant JobCreationIsAtomic {
+    -- VIOLATED under concurrent creates (O3).
+    Job.all(j => j.status != building or exactly one builder)
+}
+
+invariant WorkspaceConfinement {
+    -- VIOLATED through dangling links (O2).
+    all writes w: realpath(w) under w.workspace.root
+}
+
+invariant OneIndexWorkAtATime {
+    -- VIOLATED: chat completions to index bypass the queue.
+    count(index work running) <= 1
+}
+
+invariant EmbeddingsPersistAcrossModels {
+    -- VIOLATED by ReplaceDocument on NeedsEmbeddings.
+    Chunk.all(c => unchanged(c.document) implies c.embeddings never shrinks)
+}
+
+invariant CitationsInRange {
+    -- Holds under a schema; not enforced after decoding.
+    all answers a: a.parts.all(p => p.claims.all(c => c.sources.all(n => n >= 1 and n <= a.sources.count)))
+}
+
+----------------------------------------------------------------------
+-- Deferred
+----------------------------------------------------------------------
+
+deferred retrieve(question)
+deferred rerank(hits)
+deferred relevant(hits)
+deferred blend(old, observed)
+
+----------------------------------------------------------------------
+-- Open questions
+----------------------------------------------------------------------
+
+open question "Should hailo-ollama's window be min(2048, the model's catalogue ctx)? llama3.2:3b's 896 is ignored today (O1)."
+open question "How should concurrent job creation behave: lock the root while creating, or create under a unique temporary name and treat 'already there' as success (O3)?"
+open question "Should resolve follow a dangling final link by reading the link's target, and refuse it when the target is outside (O2)? Should the agent also be barred from .envrc, Setup.hs, cabal.project, flake.nix and other files whose contents run as commands?"
+open question "Should /v1/chat/completions to index go through the same one-at-a-time queue as the page's jobs, waiting its turn while the HTTP request is held open?"
+open question "Should request bodies be bounded while reading, so an over-limit body is refused before it is held in memory?"
+open question "What is the maximum number of queued ask jobs, and should queued jobs survive a gateway restart (stored in the index database)?"
+open question "Should the user and assistant turns of a finished ask be stored in one transaction?"
+open question "Should finished ask jobs be pruned on a timer rather than on the next submission?"
+open question "Should the ask runner be supervised so it restarts after an unexpected exception, marking the job it was running as failed?"
+open question "Should ingests of one root take a lock (an advisory lock in Postgres keyed by root, or a lock file) so the post-commit hook and a manual run cannot overlap?"
+open question "Should adding a second embedding model's vectors leave the first model's vectors in place, writing only the missing embeddings?"
+open question "Should an answer citing an out-of-range source be refused, have those numbers removed, or be retried? Should 'nothing matched' be a constructor instead of a message prefix?"
+open question "Should sessions belong to the key owner, or is one shared set of conversations across all keys intended?"
+open question "Should relevance_margin (0.08, chosen by hand on one index and one embedding model) move into the catalogue per embedding model and be set by the evaluation sets?"
