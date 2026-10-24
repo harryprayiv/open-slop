@@ -2,7 +2,9 @@
 -- open-slop.allium
 --
 -- Distilled from open-slop, branch main (5807f7a, 2026-10-22), the Haskell
--- library and programs.
+-- library and programs. Revised 2026-10-24 after the fixes for O1, O2 and
+-- O3: those three rules and their invariants now describe the code as it
+-- is, and their open questions are closed.
 --
 -- Scope
 --   Includes: the catalogue and per-request capacity, chunked jobs (llmq),
@@ -198,10 +200,10 @@ rule WindowForRequest {
     @guidance "llama-server's n_ctx is the allocation itself, so it wins. On
                every other engine the catalogue's ctx (the model's, else the
                backend's) is the most the operator allows on this hardware."
-    @guidance "CODE: hailo-ollama takes probeWindow's fixed 2048 as the
-               window and never applies the catalogue (O1). llama3.2:3b's
-               ctx 896 on hailo is ignored; a request sized for 2048 tokens
-               overruns what that HEF holds."
+    @guidance "CODE: matches since 2026-10-24 (O1). hailo-ollama's 2048
+               from probeWindow is capped by the catalogue like any other
+               engine's figure, so llama3.2:3b gets its catalogue ctx of
+               896."
 }
 
 rule LearnCharsPerToken {
@@ -221,13 +223,14 @@ rule CreateJob {
     let id = digest(model, budget, per_file, instruction, input)
     ensures: exactly one Job with this id exists, whole, whatever the number
              of concurrent requests for it
-    ensures: the request gets that Job, or a clear refusal while another
-             process is building it
-    @guidance "CODE: create checks meta.json, then removes and rebuilds
-               <id>.building with no lock. Concurrent creates delete each
-               other's half-built directory and fail with removePathForcibly
-               and withFile errors (O3: 7 of 8 failed). The job lock exists
-               only after the job does."
+    ensures: every request gets that Job
+    @guidance "CODE: matches since 2026-10-24 (O3). Each create builds in a
+               directory of its own, <id>.building.N, claimed with
+               createDirectory. The first rename into <id> wins; a later
+               rename fails because <id> is there, and that caller removes
+               its build and opens the winner's job."
+    @guidance "A build left by a run that died stays as <id>.building.N.
+               listJobs skips it, but nothing removes it."
 }
 
 rule RunPart {
@@ -400,11 +403,10 @@ rule ResolvePath {
               along it including the last component whether or not its
               target exists, is under workspace.root
     ensures: the resolved path is the only path read or written
-    @guidance "CODE: the existing-ancestor walk uses doesPathExist, which is
-               False for a dangling link, so a link whose target is missing
-               anchors on its directory and passes (O2). WriteFile then
-               creates the target outside the project. A repository can
-               ship such a link."
+    @guidance "CODE: matches since 2026-10-24 (O2). realLocation follows
+               each component from the root, replacing every symbolic link
+               by its target with getSymbolicLinkTarget, so a dangling link
+               is followed like any other; at most 40 links."
     @guidance "Only .tricorder.yaml is protected among files whose contents
                run as commands. .envrc (direnv), Setup.hs, cabal.project
                (build-tool-depends, source-repository-package), flake.nix
@@ -416,17 +418,14 @@ rule ResolvePath {
 ----------------------------------------------------------------------
 
 invariant WindowWithinCatalogue {
-    -- VIOLATED on hailo-ollama (O1).
     all requests r: r.engine = llama_server or r.window <= r.model_ctx ?? r.backend_ctx
 }
 
 invariant JobCreationIsAtomic {
-    -- VIOLATED under concurrent creates (O3).
     Job.all(j => j.status != building or exactly one builder)
 }
 
 invariant WorkspaceConfinement {
-    -- VIOLATED through dangling links (O2).
     all writes w: realpath(w) under w.workspace.root
 }
 
@@ -458,9 +457,8 @@ deferred blend(old, observed)
 -- Open questions
 ----------------------------------------------------------------------
 
-open question "Should hailo-ollama's window be min(2048, the model's catalogue ctx)? llama3.2:3b's 896 is ignored today (O1)."
-open question "How should concurrent job creation behave: lock the root while creating, or create under a unique temporary name and treat 'already there' as success (O3)?"
-open question "Should resolve follow a dangling final link by reading the link's target, and refuse it when the target is outside (O2)? Should the agent also be barred from .envrc, Setup.hs, cabal.project, flake.nix and other files whose contents run as commands?"
+open question "Should the agent be barred from .envrc, Setup.hs, cabal.project, flake.nix and other files whose contents run as commands, as it is from .tricorder.yaml?"
+open question "Should stale <id>.building.N directories left by runs that died be removed, and when: by llmq on start, or by a list or prune command?"
 open question "Should /v1/chat/completions to index go through the same one-at-a-time queue as the page's jobs, waiting its turn while the HTTP request is held open?"
 open question "Should request bodies be bounded while reading, so an over-limit body is refused before it is held in memory?"
 open question "What is the maximum number of queued ask jobs, and should queued jobs survive a gateway restart (stored in the index database)?"

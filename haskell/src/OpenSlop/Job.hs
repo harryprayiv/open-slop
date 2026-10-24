@@ -36,7 +36,7 @@ module OpenSlop.Job
   , listJobs
   ) where
 
-import Control.Exception (bracket)
+import Control.Exception (IOException, bracket, throwIO, try)
 import Control.Monad (forM, unless, when)
 import Data.Aeson (FromJSON (..), ToJSON, eitherDecodeFileStrict, encodeFile)
 import Data.Aeson qualified as Aeson
@@ -55,6 +55,7 @@ import OpenSlop.Stats (Stats)
 import System.Directory
 import System.FileLock (SharedExclusive (Exclusive), tryLockFile, unlockFile)
 import System.FilePath ((</>))
+import System.IO.Error (isAlreadyExistsError)
 import Text.Printf (printf)
 import Crypto.Hash.SHA256 qualified as SHA256
 
@@ -137,6 +138,18 @@ tag = printf "%04d"
 -- | Create the job directory, or open it if it already exists for this id.
 -- Built under a temporary name and renamed into place, so a half-written
 -- job never looks like a whole one.
+--
+-- Each call builds in a directory of its own, <id>.building.N, taken with
+-- createDirectory, which fails when the name is in use, so no two builders
+-- share one. Until 2026-10-24 every call built in <id>.building and removed
+-- it first, so two runs of the same command at once deleted each other's
+-- half-built job and failed (probe O3: 7 of 8 failed). The first rename into
+-- <id> wins. A later rename fails because <id> exists and is not empty, and
+-- that caller removes its own build and opens the job the winner made.
+--
+-- A build left behind by a run that died stays as <id>.building.N, and
+-- listJobs skips every name with ".building." in it, so one that got as far
+-- as writing its meta.json is not listed as a job.
 create :: FilePath -> Text -> Text -> Budget -> Bool -> Text -> Text -> IO (Job, Bool)
 create root model source budget perFile instruction input = do
   let JobId jid = jobId model budget perFile instruction input
@@ -145,8 +158,8 @@ create root model source budget perFile instruction input = do
   if exists
     then (,True) <$> open root (JobId jid)
     else do
-      let build = dir <> ".building"
-      removePathForcibly build
+      createDirectoryIfMissing True root
+      build <- claimBuildDir dir
       createDirectoryIfMissing True (build </> "chunks")
       createDirectoryIfMissing True (build </> "parts")
       createDirectoryIfMissing True (build </> "failed")
@@ -170,8 +183,28 @@ create root model source budget perFile instruction input = do
               , created = now
               }
       encodeFile (build </> "meta.json") meta
-      renameDirectory build dir
-      pure (Job {dir, meta, manifest, instruction}, False)
+      renamed <- try @IOException (renameDirectory build dir)
+      case renamed of
+        Right () -> pure (Job {dir, meta, manifest, instruction}, False)
+        Left e -> do
+          won <- doesFileExist (dir </> "meta.json")
+          removePathForcibly build
+          if won then (,True) <$> open root (JobId jid) else throwIO e
+
+-- | A new, empty directory <dir>.building.N that belongs to this caller
+-- alone: createDirectory fails when the name is taken, and the next N is
+-- tried.
+claimBuildDir :: FilePath -> IO FilePath
+claimBuildDir dir = go (0 :: Int)
+  where
+    go n = do
+      let d = dir <> ".building." <> show n
+      r <- try @IOException (createDirectory d)
+      case r of
+        Right () -> pure d
+        Left e
+          | isAlreadyExistsError e -> go (n + 1)
+          | otherwise -> throwIO e
 
 open :: FilePath -> JobId -> IO Job
 open root (JobId jid) = do
@@ -243,7 +276,8 @@ listJobs root = do
   names <- if exists then listDirectory root else pure []
   fmap concat $ forM names \n -> do
     let dir = root </> n
-    isJob <- doesFileExist (dir </> "meta.json")
+    hasMeta <- doesFileExist (dir </> "meta.json")
+    let isJob = hasMeta && not (".building." `T.isInfixOf` T.pack n)
     if not isJob
       then pure []
       else do

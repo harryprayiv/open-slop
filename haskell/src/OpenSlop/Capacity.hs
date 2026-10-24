@@ -12,7 +12,10 @@
 -- the model's trained context (from /api/show) is the most it can use, and
 -- the catalogue's ctx for the model, else for the backend, is the most the
 -- operator lets it allocate on this hardware. The window is the smaller of
--- the two. hailo-ollama's zoo models all have 2048.
+-- the two. hailo-ollama reports 2048 for every model, but a model's compiled
+-- HEF can hold less (llama3.2:3b holds 896 on the Hailo-10H), so the
+-- catalogue's ctx caps the window there as well. Only llama-server's figure
+-- is taken as it is, because it is the allocation itself.
 --
 -- So a 128K model on a machine whose catalogue says 131072 gets 128K, and
 -- the same model on a Pi whose catalogue says 16384 gets 16K. Raising the
@@ -68,7 +71,8 @@ data WindowSource
   = ServerAllocated
   -- ^ llama-server's n_ctx
   | TrainedAndConfigured
-  -- ^ the smaller of the trained context and the catalogue's ctx
+  -- ^ the smaller of what the server reports (ollama's trained context,
+  -- hailo-ollama's 2048) and the catalogue's ctx
   | ConfiguredOnly
   -- ^ the server reported nothing; the catalogue's ctx
   deriving stock (Eq, Show)
@@ -89,7 +93,8 @@ data Capacity = Capacity
   deriving stock (Show)
 
 -- | What the server says about the window. llama-server: the context it
--- allocated. ollama: the model's trained context. hailo-ollama: 2048.
+-- allocated. ollama: the model's trained context. hailo-ollama: 2048, the
+-- most any of its models takes; 'capacityFor' caps it with the catalogue.
 probeWindow :: Client -> Engine -> Text -> Text -> IO (Maybe Int)
 probeWindow client engine url model = case engine of
   LlamaServer -> do
@@ -131,7 +136,6 @@ capacityFor b m measured served =
     configured = fromMaybe b.ctx (m >>= (.ctx))
     (window, windowSource) = case (b.engine, served) of
       (LlamaServer, Just n) -> (n, ServerAllocated)
-      (HailoOllama, Just n) -> (n, ServerAllocated)
       (_, Just n) -> (min n configured, TrainedAndConfigured)
       (_, Nothing) -> (configured, ConfiguredOnly)
     cpt = do

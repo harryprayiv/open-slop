@@ -8,6 +8,13 @@
 -- writes take the resolved path, so there is no way to reach a file the
 -- check did not pass.
 --
+-- Every link along the path is followed, the last one included, whether
+-- or not its target exists. Until 2026-10-24 the check canonicalised the
+-- nearest part of the path that exists, and doesPathExist is False for a
+-- link whose target is missing, so a dangling link inside the project
+-- anchored on its own directory and passed. Writing through it created its
+-- target outside the project (probe O2). A repository can ship such a link.
+--
 -- This confines what the model reads and writes. It does not confine what
 -- the build runs: compiling the project runs its Template Haskell and any
 -- custom Setup, and tricorder runs its test suites, and the model wrote
@@ -30,6 +37,7 @@ module OpenSlop.Agent.Workspace
   ) where
 
 import Control.Exception (IOException, try)
+import Control.Monad (join)
 import Data.ByteString qualified as B
 import Data.List (isPrefixOf, sort)
 import Data.Text (Text)
@@ -41,8 +49,9 @@ import System.Directory
   ( canonicalizePath
   , createDirectoryIfMissing
   , doesDirectoryExist
-  , doesPathExist
+  , getSymbolicLinkTarget
   , listDirectory
+  , pathIsSymbolicLink
   )
 import System.FilePath (isAbsolute, joinPath, makeRelative, splitDirectories, takeDirectory, (</>))
 
@@ -68,21 +77,44 @@ resolve (Workspace root) given
   | takeFileName' parts == ".tricorder.yaml" = pure (Left (p <> " configures tricorder, whose hooks are shell commands; it is not for the model to change"))
   | otherwise = do
       let target = root </> joinPath parts
-      -- the nearest part of the path that exists decides where symbolic
-      -- links lead; what is below it does not exist yet
-      anchor <- existingAncestor target
-      real <- canonicalizePath anchor
-      pure
-        if real == root || (root <> "/") `isPrefixOf` real
-          then Right target
-          else Left (p <> " leads outside the project through a symbolic link")
+      real <- realLocation root parts
+      pure case real of
+        Left why -> Left (p <> ": " <> why)
+        Right r
+          | r == root || (root <> "/") `isPrefixOf` r -> Right target
+          | otherwise -> Left (p <> " leads outside the project through a symbolic link")
   where
     p = T.strip given
     parts = filter (`notElem` ["", "."]) (splitDirectories (T.unpack p))
     takeFileName' ps = if null ps then "" else last ps
-    existingAncestor f = do
-      e <- doesPathExist f
-      if e || takeDirectory f == f then pure f else existingAncestor (takeDirectory f)
+
+-- | Where a path really leads: the components are taken one at a time from
+-- a real directory, and each one that is a symbolic link is replaced by its
+-- target, read with getSymbolicLinkTarget, so a link whose target does not
+-- exist is followed like any other. A component that does not exist ends
+-- the following, since nothing below it can be a link. At most 40 links are
+-- followed, as the kernel allows.
+realLocation :: FilePath -> [FilePath] -> IO (Either Text FilePath)
+realLocation = go (40 :: Int)
+  where
+    go _ cur [] = pure (Right cur)
+    go hops cur (c : cs)
+      | c == "." = go hops cur cs
+      | c == ".." = go hops (takeDirectory cur) cs
+      | otherwise = do
+          let next = cur </> c
+          link <- either (const False) id <$> try @IOException (pathIsSymbolicLink next)
+          if not link
+            then go hops next cs
+            else
+              if hops <= 0
+                then pure (Left "too many symbolic links")
+                else do
+                  t <- try @IOException (getSymbolicLinkTarget next)
+                  join <$> traverse (follow hops cur cs) (either (Left . T.pack . show) Right t)
+    follow hops cur cs t
+      | isAbsolute t = go (hops - 1) "/" (drop 1 (splitDirectories t) <> cs)
+      | otherwise = go (hops - 1) cur (splitDirectories t <> cs)
 
 relativeTo :: Workspace -> FilePath -> Text
 relativeTo (Workspace root) f = T.pack (makeRelative root f)
