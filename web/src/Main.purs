@@ -8,6 +8,11 @@
 -- | visit, or `llmq-index chat --session NAME`, will find. Closing the tab
 -- | loses nothing but the progress display.
 -- |
+-- | The question asked stays on the page, under the conversation, from the
+-- | moment it is submitted until the stored conversation that answers it
+-- | is read back, so the page never shows progress for a question it no
+-- | longer shows.
+-- |
 -- | The key is kept in sessionStorage, which the browser clears when the
 -- | tab closes, so it is not left on disk.
 module Main (main) where
@@ -52,6 +57,7 @@ type State =
   , turns :: Array Turn
   , question :: String
   , job :: Maybe Job
+  , pending :: Maybe Pending
   , error :: Maybe String
   }
 
@@ -67,8 +73,13 @@ initial =
   , turns: []
   , question: ""
   , job: Nothing
+  , pending: Nothing
   , error: Nothing
   }
+
+-- | A question submitted and not yet read back as part of its
+-- | conversation.
+type Pending = { session :: String, question :: String }
 
 data Action
   = Init
@@ -130,7 +141,12 @@ handle = case _ of
         case r of
           Left e -> H.modify_ _ { error = Just e }
           Right i -> do
-            H.modify_ _ { question = "", error = Nothing, job = Just { id: i, seconds: 0.0, phase: Queued 0 } }
+            H.modify_ _
+              { question = ""
+              , error = Nothing
+              , job = Just { id: i, seconds: 0.0, phase: Queued 0 }
+              , pending = Just { session: st.session, question: trim st.question }
+              }
             follow k st.session i
       _ -> pure unit
 
@@ -146,9 +162,9 @@ follow k s i = do
       H.modify_ _ { job = Just j }
       case j.phase of
         Done _ -> do
-          H.modify_ _ { job = Nothing }
           current <- H.gets _.session
           when (current == s) (openSession s)
+          H.modify_ _ { job = Nothing, pending = Nothing }
         Failed _ -> pure unit
         _ -> follow k s i
 
@@ -187,60 +203,98 @@ running = case _ of
 render :: forall m. State -> H.ComponentHTML Action () m
 render st = HH.main_ $ case st.key of
   Nothing ->
-    [ HH.h1_ [ HH.text "open-slop index" ]
-    , HH.p_ [ HH.text "The gateway key. It is kept in this tab until the tab closes." ]
-    , HH.div [ cls "bar" ]
-        [ HH.input [ HP.type_ HP.InputPassword, HP.value st.keyInput, HE.onValueInput KeyInput ]
-        , HH.button [ HE.onClick \_ -> SaveKey ] [ HH.text "Use key" ]
+    [ HH.div [ cls "login" ]
+        [ HH.h1_ [ HH.span_ [ HH.text "open-slop" ], HH.text " index" ]
+        , HH.p_ [ HH.text "The gateway key: the part of your line in llmq-index-gateway-keys after the name. It is kept in this tab until the tab closes." ]
+        , HH.div [ cls "row" ]
+            [ HH.input [ HP.type_ HP.InputPassword, HP.placeholder "llmq_...", HP.value st.keyInput, HE.onValueInput KeyInput ]
+            , HH.button [ cls "primary", HE.onClick \_ -> SaveKey ] [ HH.text "Use key" ]
+            ]
+        , errorView st.error
         ]
-    , errorView st.error
     ]
   Just _ ->
-    [ HH.h1_ [ HH.text "open-slop index" ]
-    , HH.div [ cls "bar" ]
-        [ HH.select [ HE.onValueChange PickModel ]
-            (map (\m -> HH.option [ HP.value m, HP.selected (m == st.model) ] [ HH.text m ]) st.models)
-        , HH.select [ HE.onValueChange PickSession ]
-            ( [ HH.option [ HP.value "", HP.selected (st.session == "") ] [ HH.text "conversation..." ] ]
-                <> map (\s -> HH.option [ HP.value s, HP.selected (s == st.session) ] [ HH.text s ]) st.sessions
-            )
-        , HH.input [ HP.placeholder "new conversation", HP.value st.newSession, HE.onValueInput NewSessionInput ]
-        , HH.button [ HE.onClick \_ -> StartSession ] [ HH.text "Start" ]
-        , HH.button [ HE.onClick \_ -> ForgetKey ] [ HH.text "Forget key" ]
+    [ HH.header [ cls "top" ]
+        [ HH.div [ cls "top-inner" ]
+            [ HH.div [ cls "brand" ] [ HH.span_ [ HH.text "open-slop" ], HH.text " index" ]
+            , field "Ask"
+                ( HH.select [ HE.onValueChange PickModel ]
+                    (map (\m -> HH.option [ HP.value m, HP.selected (m == st.model) ] [ HH.text m ]) st.models)
+                )
+            , field "Conversation"
+                ( HH.select [ HE.onValueChange PickSession ]
+                    ( [ HH.option [ HP.value "", HP.selected (st.session == "") ] [ HH.text "choose..." ] ]
+                        <> map (\s -> HH.option [ HP.value s, HP.selected (s == st.session) ] [ HH.text s ]) st.sessions
+                    )
+                )
+            , field "New conversation"
+                ( HH.div [ cls "new" ]
+                    [ HH.input [ HP.placeholder "name", HP.value st.newSession, HE.onValueInput NewSessionInput ]
+                    , HH.button [ HE.onClick \_ -> StartSession ] [ HH.text "Start" ]
+                    ]
+                )
+            , HH.button [ cls "ghost", HE.onClick \_ -> ForgetKey ] [ HH.text "Forget key" ]
+            ]
         ]
-    , errorView st.error
-    , HH.div_ (map turnView st.turns)
-    , maybeView jobView st.job
-    , if st.session == "" then HH.p [ cls "ask" ] [ HH.text "Pick or start a conversation to ask a question." ]
-      else HH.div_
-        [ HH.textarea [ HP.value st.question, HP.placeholder ("Ask " <> st.model), HE.onValueInput QuestionInput ]
-        , HH.button [ HP.disabled (running st.job || trim st.question == ""), HE.onClick \_ -> Ask ] [ HH.text "Ask" ]
+    , HH.div [ cls "thread" ] $
+        ( if st.session == "" then [ HH.p [ cls "empty" ] [ HH.text "Choose a conversation or start a new one, then ask about your code." ] ]
+          else if null st.turns && not shown then [ HH.p [ cls "empty" ] [ HH.text ("Nothing asked in " <> st.session <> " yet.") ] ]
+          else map turnView st.turns
+        )
+          <> pendingView
+          <> [ errorView st.error ]
+    , if st.session == "" then HH.text ""
+      else HH.footer [ cls "composer" ]
+        [ HH.div [ cls "composer-inner" ]
+            [ HH.textarea [ HP.value st.question, HP.placeholder ("Ask " <> st.model <> " in " <> st.session), HE.onValueInput QuestionInput ]
+            , HH.button [ cls "primary", HP.disabled (running st.job || trim st.question == ""), HE.onClick \_ -> Ask ] [ HH.text "Ask" ]
+            ]
         ]
     ]
+  where
+  shown = case st.pending of
+    Just p -> p.session == st.session
+    Nothing -> false
+  pendingView = case st.pending of
+    Just p | p.session == st.session ->
+      [ questionView p.question
+      , HH.div [ cls "a" ] [ HH.div [ cls "who" ] [ HH.text st.model ], maybeView jobView st.job ]
+      ]
+    _ -> []
+
+field :: forall w i. String -> HH.HTML w i -> HH.HTML w i
+field name control = HH.label [ cls "field" ] [ HH.text name, control ]
+
+questionView :: forall w i. String -> HH.HTML w i
+questionView q = HH.div [ cls "q" ] [ HH.div [ cls "who" ] [ HH.text "You" ], HH.text q ]
 
 turnView :: forall w i. Turn -> HH.HTML w i
-turnView t = HH.div [ cls "turn" ] $ case t.role, t.answer of
-  "user", _ -> [ HH.p [ cls "user" ] [ HH.text t.text ] ]
-  _, Just a -> [ answerView a ]
-  _, Nothing -> [ HH.p_ [ HH.text t.text ] ]
+turnView t = case t.role, t.answer of
+  "user", _ -> questionView t.text
+  _, Just a -> HH.div [ cls "a" ] [ HH.div [ cls "who" ] [ HH.text "Index" ], answerView a ]
+  _, Nothing -> HH.div [ cls "a" ] [ HH.div [ cls "who" ] [ HH.text "Index" ], HH.p [ cls "plain" ] [ HH.text t.text ] ]
 
 answerView :: forall w i. Answer -> HH.HTML w i
 answerView a =
   HH.div_
-    [ HH.div_ (Array.concatMap (partView (Array.length a.parts > 1)) a.parts)
+    [ HH.div_ (map (partView (Array.length a.parts > 1)) a.parts)
     , if null a.sources then HH.text ""
       else HH.ol [ cls "sources" ] (map sourceView a.sources)
     ]
 
 -- | A part's claims, each with its source numbers, then what the sources
 -- | do not say. With more than one part, each is headed by what it asks.
-partView :: forall w i. Boolean -> Part -> Array (HH.HTML w i)
-partView several p =
+partView :: forall w i. Boolean -> Part -> HH.HTML w i
+partView several p = HH.div [ cls "part" ] $
   (if several then [ HH.p [ cls "ask" ] [ HH.text p.ask ] ] else [])
     <> map claimView p.claims
     <> gapView
   where
-  claimView c = HH.p_ [ HH.text c.claim, HH.sup_ [ HH.text (" [" <> joinWith ", " (map show c.sources) <> "]") ] ]
+  claimView c = HH.p_
+    [ HH.text c.claim
+    , if null c.sources then HH.text ""
+      else HH.span [ cls "cite" ] [ HH.text ("[" <> joinWith ", " (map show c.sources) <> "]") ]
+    ]
   gapView
     | null p.claims = [ HH.p [ cls "gap" ] [ HH.text ("Not answered from your files: " <> (if p.gap == "" then p.ask else p.gap)) ] ]
     | p.gap /= "" = [ HH.p [ cls "gap" ] [ HH.text ("Not in the sources: " <> p.gap) ] ]
@@ -249,13 +303,17 @@ partView several p =
 sourceView :: forall w i. Source -> HH.HTML w i
 sourceView s =
   HH.li [ cls (if s.cited then "cited" else "uncited") ]
-    [ HH.code_ [ HH.text (s.path <> ":" <> show s.lineFrom <> "-" <> show s.lineTo) ]
-    , HH.text (if s.heading == "" then "" else "  " <> s.heading)
+    [ HH.span [ cls "n" ] [ HH.text ("[" <> show s.number <> "]") ]
+    , HH.code_ [ HH.text (s.path <> ":" <> show s.lineFrom <> "-" <> show s.lineTo) ]
+    , if s.heading == "" then HH.text "" else HH.span [ cls "h" ] [ HH.text s.heading ]
     ]
 
 jobView :: forall w i. Job -> HH.HTML w i
-jobView j = HH.p [ cls "job" ] [ HH.text (describe j.phase <> " (" <> show (floor j.seconds) <> " s)") ]
+jobView j = case j.phase of
+  Failed _ -> HH.div [ cls "working failed" ] [ HH.text line ]
+  _ -> HH.div [ cls "working" ] [ HH.span [ cls "spin" ] [], HH.text line ]
   where
+  line = describe j.phase <> " (" <> show (floor j.seconds) <> " s)"
   describe = case _ of
     Queued 0 -> "Waiting for the index"
     Queued n -> "Waiting behind " <> show n <> " other question" <> (if n == 1 then "" else "s")

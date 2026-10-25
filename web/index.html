@@ -3,29 +3,127 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>open-slop index</title>
 <style>
-:root { --fg: #1d1d1f; --bg: #fbfbf8; --muted: #6b6b6b; --line: #deded8; --accent: #2f5d8a; --gap: #8a5a2f; }
-@media (prefers-color-scheme: dark) { :root { --fg: #e8e8e3; --bg: #18181a; --muted: #9a9a95; --line: #333336; --accent: #8ab4e0; --gap: #e0b48a; } }
+/* Dark by default, light when the system asks for it. color-scheme makes
+   the browser draw native controls (the dropdown lists of a select, the
+   scrollbars) in the same scheme, and the option rules below set their
+   colours outright, since some browsers ignore inheritance there. */
+:root {
+  color-scheme: dark;
+  --bg: #0f1115;
+  --panel: #161a21;
+  --raised: #1d222b;
+  --line: #2a303b;
+  --fg: #e6e8eb;
+  --muted: #8b93a1;
+  --accent: #7aa2f7;
+  --accent-fg: #0f1115;
+  --you: #1b2433;
+  --gap: #e0af68;
+  --ok: #9ece6a;
+  --error: #f7768e;
+  --mono: ui-monospace, "JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --raised: #eef0f4;
+    --line: #d8dce3;
+    --fg: #1c2027;
+    --muted: #5d6573;
+    --accent: #2f5bd3;
+    --accent-fg: #ffffff;
+    --you: #e8eefb;
+    --gap: #9a6200;
+    --ok: #3d7a1a;
+    --error: #b3261e;
+  }
+}
+
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; }
-main { max-width: 52rem; margin: 0 auto; padding: 1rem; }
-h1 { font-size: 1.2rem; margin: 0 0 1rem; }
-.bar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: 1rem; }
-input, select, textarea, button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: .35rem .5rem; }
-button { cursor: pointer; }
-button:disabled { opacity: .5; cursor: default; }
-textarea { width: 100%; min-height: 5rem; }
-.turn { border-top: 1px solid var(--line); padding: .75rem 0; }
-.user { font-weight: 600; }
-.ask { color: var(--muted); margin: .5rem 0 0; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.6 var(--sans); }
+main { min-height: 100%; display: flex; flex-direction: column; }
+
+/* Controls. */
+input, select, textarea, button {
+  font: inherit; color: var(--fg); background: var(--raised);
+  border: 1px solid var(--line); border-radius: 6px; padding: .4rem .6rem;
+}
+select { padding-right: 1.6rem; cursor: pointer; }
+option { background: var(--panel); color: var(--fg); }
+input::placeholder, textarea::placeholder { color: var(--muted); }
+input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+button { cursor: pointer; white-space: nowrap; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 600; }
+button.primary:hover:not(:disabled) { filter: brightness(1.1); }
+button.ghost { background: transparent; color: var(--muted); }
+button:disabled { opacity: .45; cursor: default; }
+label.field { display: flex; flex-direction: column; gap: .2rem; font-size: .75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+label.field > * { text-transform: none; letter-spacing: normal; font-size: .95rem; }
+
+/* The bar along the top. */
+.top { position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--line); }
+.top-inner { max-width: 60rem; margin: 0 auto; padding: .75rem 1rem; display: flex; flex-wrap: wrap; gap: .75rem 1rem; align-items: flex-end; }
+.brand { font: 600 1rem var(--mono); margin-right: auto; align-self: center; }
+.brand span { color: var(--accent); }
+.new { display: flex; gap: .4rem; }
+
+/* The conversation. */
+.thread { flex: 1; width: 100%; max-width: 60rem; margin: 0 auto; padding: 1.25rem 1rem 1rem; display: flex; flex-direction: column; gap: 1rem; }
+.empty { color: var(--muted); text-align: center; margin: 4rem auto; max-width: 30rem; }
+.who { font: 600 .72rem var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: .3rem; }
+.q { align-self: flex-end; max-width: 85%; background: var(--you); border: 1px solid var(--line); border-radius: 10px 10px 2px 10px; padding: .6rem .85rem; white-space: pre-wrap; }
+.a { background: var(--panel); border: 1px solid var(--line); border-radius: 10px 10px 10px 2px; padding: .75rem 1rem; }
+.a p { margin: .35rem 0; }
+.plain { white-space: pre-wrap; }
+.part + .part { border-top: 1px dashed var(--line); margin-top: .6rem; padding-top: .6rem; }
+.ask { color: var(--muted); font-style: italic; }
+.cite { font: .72rem var(--mono); color: var(--accent); margin-left: .25rem; vertical-align: super; }
 .gap { color: var(--gap); }
-sup { color: var(--accent); }
-.sources { color: var(--muted); font-size: .9rem; padding-left: 1.5rem; }
-.sources .cited { color: var(--fg); }
-.sources code { overflow-wrap: anywhere; }
-.job { color: var(--accent); }
-.error { color: #b3261e; }
+
+.sources { margin: .75rem 0 0; padding: .6rem 0 0; border-top: 1px solid var(--line); list-style: none; display: flex; flex-direction: column; gap: .2rem; font-size: .85rem; }
+.sources li { display: flex; gap: .5rem; align-items: baseline; color: var(--muted); }
+.sources .n { font: .75rem var(--mono); color: var(--accent); min-width: 2rem; }
+.sources li.uncited .n { color: var(--muted); }
+.sources code { font: .82rem var(--mono); color: var(--fg); overflow-wrap: anywhere; }
+.sources li.uncited code { color: var(--muted); }
+.sources .h { overflow-wrap: anywhere; }
+
+/* A question being answered. */
+.working { display: flex; gap: .6rem; align-items: center; color: var(--accent); font-family: var(--mono); font-size: .88rem; }
+.working.failed { color: var(--error); }
+.spin { width: .9rem; height: .9rem; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+
+/* The box to ask in, along the bottom. */
+.composer { position: sticky; bottom: 0; background: var(--panel); border-top: 1px solid var(--line); }
+.composer-inner { max-width: 60rem; margin: 0 auto; padding: .75rem 1rem; display: flex; gap: .6rem; align-items: flex-end; }
+.composer textarea { flex: 1; min-height: 3.2rem; max-height: 40vh; resize: vertical; font-family: var(--sans); }
+
+/* The key screen. */
+.login { max-width: 26rem; margin: 18vh auto 0; padding: 1.5rem; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; display: flex; flex-direction: column; gap: .8rem; }
+.login h1 { font: 600 1.1rem var(--mono); margin: 0; }
+.login h1 span { color: var(--accent); }
+.login p { margin: 0; color: var(--muted); font-size: .9rem; }
+.login .row { display: flex; gap: .5rem; }
+.login input { flex: 1; font-family: var(--mono); }
+
+.error { color: var(--error); background: color-mix(in srgb, var(--error) 10%, transparent); border: 1px solid color-mix(in srgb, var(--error) 40%, transparent); border-radius: 6px; padding: .5rem .75rem; margin: 0; }
+.thread > .error { align-self: stretch; }
+
+@media (max-width: 40rem) {
+  .brand { width: 100%; }
+  .top-inner > label.field { flex: 1 1 45%; }
+  .q { max-width: 100%; }
+}
 </style>
 <script defer src="index.js"></script>
 </head>
