@@ -20,6 +20,7 @@ module OpenSlop.Rag.Ask
   , AskConfig (..)
   , defaultAskConfig
   , askingFrom
+  , guideKinds
   ) where
 
 import Control.Exception (AsyncException (..), SomeException, displayException, throwIO, try)
@@ -62,6 +63,9 @@ data Asking = Asking
   -- are dropped
   , splitQuestions :: Bool
   -- ^ split a question that may ask several things and search each part
+  , guides :: [(Text, Int)]
+  -- ^ document kinds searched on their own for every question, and how
+  -- many of each are sent first, before the other sources; see 'select'
   , maxWait :: Maybe Double
   , scope :: IORef [Text]
   , note :: Text -> IO ()
@@ -82,10 +86,13 @@ data Selection = Selection
   -- ^ every part's candidates, best first, each scored relative to the
   -- best candidate of its own part (so each part's best is 0): the
   -- reranker's score with a reranker, else similarity
+  , guides :: [Hit]
+  -- ^ the best of each kind in 'Asking'.guides, searched on their own
   , kept :: [Hit]
   -- ^ those within the margin, at most --sources
   , packed :: [Hit]
-  -- ^ those of 'kept' that fit the model's capacity; what the model is given
+  -- ^ 'guides', then those of 'kept' not among them, as many as fit the
+  -- model's capacity; what the model is given
   }
 
 -- | Rewrite against the history, split into parts, retrieve and score
@@ -104,6 +111,19 @@ data Selection = Selection
 -- answering chunks as searching whole, cost a model call per compound
 -- question, and sent more sources, because each part that the files cannot
 -- answer still contributes its own best candidates.
+--
+-- Specifications and chase bundles are also searched on their own, for
+-- the question as searched, and the best few of each ('Asking'.guides) are
+-- sent first. A question about how a program fits together ("the control
+-- flow of the frontend") is answered by an .allium rule or a chase module
+-- summary rather than by any one piece of code, but in the shared search
+-- such a chunk competes with every file of the repository and lost to a
+-- spago.yaml and a test client for that question on 2026-10-24. A search
+-- of its own puts the closest of them in front of the model whatever the
+-- code ranks. Each costs one more search and, with a reranker, one more
+-- reranking of a few candidates; a kind with nothing in scope adds
+-- nothing, and a failure there is noted and the question goes on without
+-- it.
 --
 -- Searching beside the question for the chat model's guess at the
 -- answer's text was tried the same day and removed. The model has never
@@ -136,12 +156,15 @@ select a history question = do
         Right results
           | all (null . snd) results -> pure (Left (if null sc then "nothing in the index matches that question" else "nothing under " <> T.intercalate ", " sc <> " matches that question"))
           | otherwise -> do
+              guides <- concat <$> traverse (uncurry (guideKind a sc q)) [(k, n) | (k, n) <- a.guides, n > 0]
               let found = map fst results
                   ranked = mergeParts (map snd results)
                   margin = maybe relevanceMargin (const a.rerankMargin) a.rerankWith
                   close = [h | (h, s) <- ranked, s >= negate margin]
                   kept = take a.sources close
-                  packed = packSources cap a.maxWait (historyChars cap a.maxWait history question) kept
+                  guideKeys = map key guides
+                  sent = guides <> [h | h <- kept, key h `notElem` guideKeys]
+                  packed = packSources cap a.maxWait (historyChars cap a.maxWait history question) sent
               a.note
                 ( T.pack (show (length close))
                     <> " within "
@@ -153,10 +176,12 @@ select a history question = do
                     <> " (--sources "
                     <> T.pack (show a.sources)
                     <> "), "
+                    <> T.pack (show (length guides))
+                    <> " specification and summary sources put first, "
                     <> T.pack (show (length packed))
-                    <> " fit"
+                    <> " of all of them fit"
                 )
-              pure (Right Selection {query = q, searched = parts, found, ranked, kept, packed})
+              pure (Right Selection {query = q, searched = parts, found, ranked, guides, kept, packed})
 
 -- | One part's hits from the search, and its candidates best first, scored
 -- relative to the best.
@@ -193,12 +218,33 @@ scorePart a sc depthEach part =
       [] -> []
       xs@((_, best) : _) -> [(h, s - best) | (h, s) <- xs]
 
+-- | The best @n@ chunks of one kind for the question: the hybrid search
+-- within that kind, reordered by the reranker when there is one. Nothing
+-- of that kind in scope, or a failure, gives none.
+guideKind :: Asking -> [Text] -> Text -> Text -> Int -> IO [Hit]
+guideKind a sc q kind n =
+  retrieveKinds a.client a.conn a.embedWith [kind] Retrieval {depth = a.depth, limit = a.depth, scope = sc} q >>= \case
+    Left e -> a.note ("no " <> kind <> " sources: " <> e) >> pure []
+    Right [] -> pure []
+    Right hits -> case a.rerankWith of
+      Nothing -> pure (take n (sortOn (Down . (.similarity)) hits))
+      Just rr ->
+        rerank a.client rr q (take (2 * n + 4) hits) >>= \case
+          Left e -> a.note ("the " <> kind <> " sources were not reranked (" <> e <> ")") >> pure (take n hits)
+          Right scored -> do
+            let chosen = take n scored
+            a.note ("best " <> kind <> " sources: " <> T.intercalate ", " [h.path <> ":" <> T.pack (show h.lineFrom) <> (if T.null h.heading then "" else " (" <> h.heading <> ")") | (h, _) <- chosen])
+            pure (map fst chosen)
+
+-- | Where a chunk is, which identifies it.
+key :: Hit -> (Text, Int, Int)
+key h = (h.path, h.lineFrom, h.lineTo)
+
 -- | The parts' candidates as one list, best first, a chunk found by more
 -- than one part kept once with its best score.
 mergeParts :: [[(Hit, Double)]] -> [(Hit, Double)]
 mergeParts perPart = sortOn (Down . snd) (Map.elems (Map.fromListWith better [(key h, (h, s)) | (h, s) <- concat perPart]))
   where
-    key h = (h.path, h.lineFrom, h.lineTo)
     better x y = if snd x >= snd y then x else y
 
 -- | Ask the model, constrained to the answer schema, with the sources
@@ -233,6 +279,10 @@ data AskConfig = AskConfig
   , rerankDepth :: Int
   , rerankMargin :: Double
   , splitQuestions :: Bool
+  , specSources :: Int
+  -- ^ .allium chunks sent first with every answer
+  , chaseSources :: Int
+  -- ^ chase bundle chunks sent first with every answer
   , maxWait :: Maybe Double
   }
 
@@ -250,8 +300,15 @@ defaultAskConfig embedAt embedModel chatAt chatModel =
     , rerankDepth = 30
     , rerankMargin = 2.0
     , splitQuestions = False
+    , specSources = 2
+    , chaseSources = 2
     , maxWait = Nothing
     }
+
+-- | The kinds searched on their own for every question, by Extract's names
+-- for them, with how many of each are sent.
+guideKinds :: Int -> Int -> [(Text, Int)]
+guideKinds specs summaries = [("allium", specs), ("chase", summaries)]
 
 -- | An 'Asking' for the whole index, every server checked to be on the
 -- LAN, the chat model's capacity worked out from its server, the
@@ -289,6 +346,7 @@ askingFrom client cat conn c note = do
         , rerankDepth = c.rerankDepth
         , rerankMargin = c.rerankMargin
         , splitQuestions = c.splitQuestions
+        , guides = guideKinds c.specSources c.chaseSources
         , maxWait = c.maxWait
         , scope = sc
         , note

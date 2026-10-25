@@ -297,11 +297,16 @@ data Hit = Hit
 -- given prefixes, in both halves, so the candidates are drawn from the
 -- scope rather than filtered out of the whole index afterwards.
 --
+-- A non-empty list of kinds keeps only documents of those kinds ("allium",
+-- "chase"; see llmq-index's Extract), the same way. The kinds are this
+-- program's own names, not the user's text, and go into the statement as
+-- quoted literals.
+--
 -- Every hit also carries its cosine similarity to the question, computed
 -- for word matches too, so "OpenSlop.Rag.Retrieve" can drop candidates
 -- that are far from the question however they ranked.
-search :: Connection -> Text -> [Double] -> Text -> [Text] -> Int -> Int -> IO [Hit]
-search conn model qvec qtext scope depth limit = do
+search :: Connection -> Text -> [Double] -> Text -> [Text] -> [Text] -> Int -> Int -> IO [Hit]
+search conn model qvec qtext scope kinds depth limit = do
   let dims = length qvec
       d = T.pack (show dims)
       dist = "e.embedding::vector(" <> d <> ") <=> ?::vector(" <> d <> ")"
@@ -347,9 +352,13 @@ search conn model qvec qtext scope depth limit = do
              \ ORDER BY f.score DESC, d.path, c.ordinal LIMIT ?"
       lit = vectorLiteral qvec
       patterns = PGArray (map likePrefix scope)
-      scoped alias
+      scoped alias = ofKinds alias <> inScope alias
+      inScope alias
         | null scope = ""
         | otherwise = " AND " <> alias <> ".path LIKE ANY (?)"
+      ofKinds alias
+        | null kinds = ""
+        | otherwise = " AND " <> alias <> ".kind IN (" <> T.intercalate ", " (map quoteLiteral kinds) <> ")"
   rows <-
     if null scope
       then query conn (fromString (T.unpack sql)) ((lit, model, lit, depth, qtext, depth) :. (lit, model, limit))

@@ -7,7 +7,9 @@
 -- citation names the page.
 --
 -- An .allium file is a specification of what the code should do (rules,
--- invariants, and where the code differs from them), read as it is.
+-- invariants, and where the code differs from them), read as it is and
+-- split at its top-level declarations, so each chunk is headed by the rule
+-- or entity it holds; see "OpenSlop.Rag.Split".
 --
 -- A .chase bundle (from chase, the structural compressor for Haskell and
 -- PureScript) is split per module: each "=== BEGIN path ===" line becomes a
@@ -74,7 +76,7 @@ structureOf = \case
   Chase -> Headed
   PlainText -> Flat
   Code -> Flat
-  Allium -> Flat
+  Allium -> Declared
 
 classify :: FilePath -> Maybe Kind
 classify path = case map toLower (takeExtension path) of

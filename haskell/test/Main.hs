@@ -85,6 +85,8 @@ main =
           , testCase "headings become the chunk's path" splitHeadings
           , testCase "a heading inside a code fence is not a heading" splitFence
           , testCase "a comment in code is not a heading" splitFlat
+          , testCase "a specification is split at its declarations" splitDeclared
+          , testProperty "splitting a specification loses and adds no text" prop_splitDeclaredKeeps
           , testCase "ignore patterns match as in a .gitignore" ignorePatterns
           , testCase "secrets are recognised by their content" secrets
           , testCase "hosts are read out of URLs" hosts
@@ -374,6 +376,37 @@ splitFlat = do
       ps = split (SplitConfig 1000 1000) Flat doc
   map (.heading) ps @?= [[]]
   map (\p -> (p.lineFrom, p.lineTo)) ps @?= [(1, 5)]
+
+splitDeclared :: Assertion
+splitDeclared = do
+  let doc =
+        T.unlines
+          [ "-- allium: 3"
+          , "------------"
+          , "-- Rules"
+          , "------------"
+          , ""
+          , "-- Closing a sale."
+          , "rule CheckoutCompletes {"
+          , "    when: Checkout(sale)"
+          , "}"
+          , ""
+          , "entity Sale {"
+          , "    total: Cents"
+          , "}"
+          ]
+      ps = split (SplitConfig 1000 1000) Declared doc
+  map (.heading) ps @?= [[], ["Rules"], ["Rules", "rule CheckoutCompletes"], ["Rules", "entity Sale"]]
+  map (\p -> (p.lineFrom, p.lineTo)) ps @?= [(1, 1), (2, 4), (6, 9), (11, 13)]
+
+prop_splitDeclaredKeeps :: Property
+prop_splitDeclaredKeeps = forAll genSpec \d -> forAll genSplit \c ->
+  T.filter (not . isSpace) (T.concat (map (.body) (split (cfgOf c) Declared d))) === T.filter (not . isSpace) d
+  where
+    genSpec = T.intercalate "\n" <$> listOf (frequency [(4, plain), (2, pure ""), (2, decl), (2, pure "------------"), (2, comment)])
+    plain = T.pack <$> listOf (elements (['a' .. 'z'] <> " {}:"))
+    decl = (\k n -> k <> " " <> n <> " {") <$> elements ["rule", "entity", "enum", "surface"] <*> (T.pack <$> listOf1 (elements ['A' .. 'Z']))
+    comment = ("-- " <>) . T.pack <$> listOf (elements ['a' .. 'z'])
 
 ignorePatterns :: Assertion
 ignorePatterns = do

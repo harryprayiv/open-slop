@@ -54,6 +54,7 @@
 module OpenSlop.Rag.Retrieve
   ( Retrieval (..)
   , retrieve
+  , retrieveKinds
   , Chat (..)
   , Answer (..)
   , Claim (..)
@@ -99,10 +100,15 @@ data Retrieval = Retrieval
   }
 
 retrieve :: Client -> Connection -> Embedder -> Retrieval -> Text -> IO (Either Text [Hit])
-retrieve client conn e r query =
+retrieve client conn e = retrieveKinds client conn e []
+
+-- | 'retrieve' within documents of the given kinds ("allium", "chase"; see
+-- llmq-index's Extract); no kinds means every kind.
+retrieveKinds :: Client -> Connection -> Embedder -> [Text] -> Retrieval -> Text -> IO (Either Text [Hit])
+retrieveKinds client conn e kinds r query =
   embed client e ForQuery [query] >>= \case
     Left err -> pure (Left err)
-    Right [v] -> Right <$> search conn e.model v query r.scope r.depth r.limit
+    Right [v] -> Right <$> search conn e.model v query r.scope kinds r.depth r.limit
     Right _ -> pure (Left "the embedding server returned no vector for the question")
 
 -- | One statement of the answer and the sources it rests on. The field
@@ -272,6 +278,7 @@ instructions =
     , "A source that is documentation (a .md, .txt, .org or .rst file, or a README) describes the code as it was when it was written and can be out of date. When it disagrees with a source that is code, the code is right."
     , "A source whose path ends in .chase is a summary of code: its signatures and types are exact, but its notes (lines starting with !, >, ? or %) were written by hand or by a model and can be out of date. When it disagrees with a source that is code, the code is right."
     , "A source whose path ends in .allium is a specification: its rules say what the code is meant to do, and a line starting with @guidance \"CODE:\" says where the code differs. It was written by hand or by a model and can be out of date. When it disagrees with a source that is code, the code is what runs."
+    , "The first sources may be .allium or .chase sources chosen because they describe how the code the question is about fits together. Use them for how the parts connect and in what order things happen, and the code sources for the details."
     , "Earlier turns of the conversation are context, not sources."
     ]
 

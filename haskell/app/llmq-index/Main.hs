@@ -40,6 +40,12 @@
 -- to 2400 characters less for oracle's CPU to read before it answers; the
 -- mean answer took 229 to 300 seconds at 6.
 --
+-- --spec-sources and --chase-sources default to 2 each: that many chunks of
+-- the .allium specifications and of the chase bundles in scope are
+-- searched for on their own and sent before the other sources (see
+-- "OpenSlop.Rag.Ask".select). Each is up to 2400 more characters for the
+-- model to read; 0 turns either off.
+--
 -- --rerank-depth defaults to 30. At 20, three of 25 answering chunks in
 -- the evaluation sets were found by the search at 25th to 29th and never
 -- scored; at 30 all three were kept and nothing else moved, for about 25
@@ -55,7 +61,7 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Time (defaultTimeLocale, formatTime)
 import Converse (askOnce, converse)
-import OpenSlop.Rag.Ask (Asking (..))
+import OpenSlop.Rag.Ask (Asking (..), guideKinds)
 import Eval (EvalOpts (..), runEval)
 import Ingest (IngestOpts (..), ingestRoot)
 import Numeric (showFFloat)
@@ -94,6 +100,8 @@ data Talk = Talk
   , rerankDepth :: Int
   , rerankMargin :: Double
   , split :: Bool
+  , specSources :: Int
+  , chaseSources :: Int
   , under :: [FilePath]
   }
 
@@ -136,6 +144,8 @@ talkP =
     <*> rerankDepthP
     <*> rerankMarginP
     <*> switch (long "split" <> help "have the model split a question that may ask several things, and search each part on its own")
+    <*> option auto (long "spec-sources" <> value 2 <> showDefault <> help "the best chunks of the .allium specifications in scope, searched on their own and sent first; 0 for none")
+    <*> option auto (long "chase-sources" <> value 2 <> showDefault <> help "the best chunks of the chase bundles in scope, searched on their own and sent first; 0 for none")
     <*> underP
 
 rerankMarginP :: Parser Double
@@ -400,6 +410,7 @@ asking g conn t = do
       , rerankDepth = t.rerankDepth
       , rerankMargin = t.rerankMargin
       , splitQuestions = t.split
+      , guides = guideKinds t.specSources t.chaseSources
       , maxWait = t.maxWait
       , scope = sc
       , note = say

@@ -17,7 +17,16 @@
 -- and sent to the reranker as if it named the section. A flat document has
 -- one section with no heading.
 --
--- Either way, inside a section blank-line separated blocks are packed up to
+-- 'Declared' is for Allium specifications. Each top-level declaration
+-- (an entity, a rule, a surface, an enum and so on) starts a section whose
+-- heading is the declaration, "rule CheckoutCompletes", under the banner
+-- comment it sits beneath ("Rules"), and the comment lines directly above
+-- a declaration go with it. Until 2026-10-25 a specification was split
+-- 'Flat', so a chunk carried no heading and could begin halfway through
+-- one rule and end in the next; neither the embedding nor the citation
+-- said which rule it was.
+--
+-- Whichever way, inside a section blank-line separated blocks are packed up to
 -- the target size; a block larger than the target is cut at line
 -- boundaries, and a line larger than the target is cut by characters.
 --
@@ -87,6 +96,8 @@ data Structure
   -- ^ markdown-shaped: ATX headings outside code fences open sections
   | Flat
   -- ^ code or plain text: no line is a heading
+  | Declared
+  -- ^ an Allium specification: each top-level declaration opens a section
   deriving stock (Eq, Show)
 
 split :: SplitConfig -> Structure -> Text -> [Piece]
@@ -99,6 +110,7 @@ split cfg0 structure input =
     grouped = case structure of
       Headed -> sections numbered
       Flat -> [Section {path = [], slines = numbered} | not (null numbered)]
+      Declared -> declarations numbered
     cfg = cfg0 {hardLimit = max cfg0.target cfg0.hardLimit, target = max 1 cfg0.target}
     numbered = zipWith Line [1 ..] (T.lines (T.replace "\r\n" "\n" input))
 
@@ -117,6 +129,76 @@ sections = go [] False [] []
       | otherwise = go path inFence (l : acc) out ls
     close _ [] out = out
     close path acc out = Section {path, slines = reverse acc} : out
+
+-- | Group an Allium specification's lines into sections, one per top-level
+-- declaration, each under the banner it follows. A banner is a comment line
+-- between two ruler lines (a comment of dashes only):
+--
+-- > ------------------------------
+-- > -- Rules
+-- > ------------------------------
+--
+-- and it opens a section of its own, headed by its title, which holds the
+-- banner and whatever comes before the first declaration under it. The
+-- comment lines directly above a declaration, with no blank line between,
+-- open the declaration's section with it, since they describe it.
+declarations :: [Line] -> [Section]
+declarations = go [] [] [] []
+  where
+    go _ path acc out [] = reverse (close path acc out)
+    go banner path acc out (l : ls)
+      | Just title <- bannerTitle acc l ls =
+          -- the ruler above the title moves into the banner's section
+          let rulerAbove = take 1 acc
+           in go [title] [title] (l : rulerAbove) (close path (drop 1 acc) out) ls
+      | Just name <- declaration l.txt =
+          let (described, before) = span (\x -> isComment x.txt && not (isRuler x.txt)) acc
+           in go banner (banner <> [name]) (l : described) (close path before out) ls
+      | otherwise = go banner path (l : acc) out ls
+    close _ [] out = out
+    close path acc out = Section {path, slines = reverse acc} : out
+    bannerTitle acc l ls = case (acc, ls) of
+      (above : _, below : _)
+        | isRuler above.txt, isRuler below.txt, isComment l.txt, not (isRuler l.txt) ->
+            let t = T.strip (T.drop 2 l.txt) in if T.null t then Nothing else Just t
+      _ -> Nothing
+
+isComment :: Text -> Bool
+isComment = T.isPrefixOf "--"
+
+isRuler :: Text -> Bool
+isRuler t = let s = T.strip t in T.length s >= 4 && T.all (== '-') s
+
+-- | A top-level Allium declaration, as its keyword and name: "rule
+-- CheckoutCompletes". Only at the start of a line: a declaration inside
+-- another is part of it.
+declaration :: Text -> Maybe Text
+declaration t = case T.words t of
+  (kw : rest) | kw `elem` declarationKeywords, not (T.null (T.take 1 t)), T.take 1 t /= " " ->
+    case rest of
+      (n : _) | let name = T.takeWhile (\c -> c /= '{' && c /= '(' && c /= ':') n, not (T.null name) -> Just (kw <> " " <> name)
+      _ -> Just kw
+  _ -> Nothing
+
+declarationKeywords :: [Text]
+declarationKeywords =
+  [ "actor"
+  , "config"
+  , "contract"
+  , "default"
+  , "deferred"
+  , "entity"
+  , "enum"
+  , "external"
+  , "given"
+  , "invariant"
+  , "module"
+  , "open"
+  , "rule"
+  , "surface"
+  , "use"
+  , "value"
+  ]
 
 isFence :: Text -> Bool
 isFence t = let s = T.stripStart t in "```" `T.isPrefixOf` s || "~~~" `T.isPrefixOf` s
