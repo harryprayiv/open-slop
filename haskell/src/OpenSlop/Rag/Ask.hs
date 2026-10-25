@@ -177,9 +177,13 @@ select a history question = do
                     <> T.pack (show a.sources)
                     <> "), "
                     <> T.pack (show (length guides))
-                    <> " specification and summary sources put first, "
+                    <> " specification and summary sources put first ("
+                    <> T.pack (show (length kept + length guides - length sent))
+                    <> " of them also kept), "
                     <> T.pack (show (length packed))
-                    <> " of all of them fit"
+                    <> " of the "
+                    <> T.pack (show (length sent))
+                    <> " sources fit"
                 )
               pure (Right Selection {query = q, searched = parts, found, ranked, guides, kept, packed})
 
