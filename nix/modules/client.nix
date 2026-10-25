@@ -1,6 +1,11 @@
 # The client side: llmq on PATH, with the catalogue and this machine's
 # endpoints baked into its environment.
 #
+# On the machine that holds llmq-index's database it can also run the
+# gateway that serves the index and its web page, as a user service
+# (indexGateway below). It runs as the user because the database lets its
+# owner in over the local socket and no one else.
+#
 # A home-manager module. The consumer says which rows serve which backends
 # and at what address; open-slop turns that plus the catalogue into the JSON
 # llmq reads, and wraps the binary so $OPEN_SLOP_CATALOGUE points at it and
@@ -27,6 +32,7 @@
 }:
 let
   cfg = config.programs.llmq;
+  ig = cfg.indexGateway;
   inherit (lib) types;
 
   catalogue = lib.recursiveUpdate (import ../../catalogue) cfg.catalogue.extra;
@@ -216,14 +222,108 @@ in
       default = { };
       description = "Merged over the shipped catalogue with lib.recursiveUpdate. Keep it equal to the server side's.";
     };
+
+    # The gateway that serves the index, on the machine with the database
+    # (services.open-slop.rag). It is not services.open-slop.gateway: that
+    # one fronts an inference row's own backends as a DynamicUser, and the
+    # database admits only its owner. This one runs as that owner, with this
+    # machine's catalogue (the inference rows in `endpoints`) and the rag
+    # settings above, so its answers come from the same servers as
+    # llmq-index ask. The page asks for a key from keysFile and sends it on
+    # every call.
+    #
+    # A user service runs while the user has a session, unless lingering is
+    # on: users.users.NAME.linger = true in the NixOS configuration keeps it
+    # running from boot.
+    indexGateway = {
+      enable = lib.mkEnableOption "open-slop-gateway --index as a user service, serving the index and its web page";
+
+      host = lib.mkOption {
+        type = types.str;
+        default = "127.0.0.1";
+        description = "Bind address. On loopback, reach it from another machine with ssh -L. Anything else needs plaintextLan, since this service has no TLS settings.";
+      };
+
+      port = lib.mkOption {
+        type = types.port;
+        default = 8443;
+      };
+
+      plaintextLan = lib.mkOption {
+        type = types.bool;
+        default = false;
+        description = "Bind a LAN address without TLS. Keys then cross the network in clear.";
+      };
+
+      keysFile = lib.mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "/run/secrets/llmq-index-gateway-keys";
+        description = ''
+          One `name key` per line, keys of 24 characters or more. A path
+          outside the store that this user can read, for example a sops
+          secret with owner set to the user.
+        '';
+      };
+
+      web = lib.mkOption {
+        type = types.nullOr types.package;
+        default = null;
+        example = lib.literalExpression "inputs.open-slop.packages.\${pkgs.system}.web";
+        description = "The built web page (open-slop's web output), served at /. Unset means the API alone.";
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
-    assertions = lib.mapAttrsToList (row: r: {
-      assertion = lib.all (b: catalogue.backends ? ${b}) r.backends;
-      message = "programs.llmq.endpoints.${row}.backends names a backend the catalogue does not have: ${lib.concatStringsSep ", " (lib.filter (b: !(catalogue.backends ? ${b})) r.backends)}";
-    }) cfg.endpoints;
+    assertions =
+      lib.mapAttrsToList (row: r: {
+        assertion = lib.all (b: catalogue.backends ? ${b}) r.backends;
+        message = "programs.llmq.endpoints.${row}.backends names a backend the catalogue does not have: ${lib.concatStringsSep ", " (lib.filter (b: !(catalogue.backends ? ${b})) r.backends)}";
+      }) cfg.endpoints
+      ++ lib.optionals ig.enable [
+        {
+          assertion = ig.keysFile != null;
+          message = "programs.llmq.indexGateway needs keysFile: the page and every client send a key from it.";
+        }
+        {
+          assertion = lib.all (v: v != null) [ cfg.rag.embedAt cfg.rag.embedModel cfg.rag.chatAt cfg.rag.chatModel ];
+          message = "programs.llmq.indexGateway answers with the rag settings; set programs.llmq.rag.embedAt, embedModel, chatAt and chatModel.";
+        }
+        {
+          assertion = lib.elem ig.host [ "127.0.0.1" "::1" "localhost" ] || ig.plaintextLan;
+          message = "programs.llmq.indexGateway binds ${ig.host} without TLS; set plaintextLan = true to accept that keys cross the network in clear, or bind loopback and use ssh -L.";
+        }
+      ];
 
     home.packages = [ wrapped ];
+
+    systemd.user.services.llmq-index-gateway = lib.mkIf ig.enable {
+      Unit.Description = "open-slop gateway serving llmq-index on ${ig.host}:${toString ig.port}";
+      Service = {
+        ExecStart = lib.escapeShellArgs (
+          [
+            "${wrapped}/bin/open-slop-gateway"
+            "--catalogue"
+            "${catalogueJson}"
+            "--keys"
+            ig.keysFile
+            "--host"
+            ig.host
+            "--port"
+            (toString ig.port)
+            "--index"
+          ]
+          ++ lib.optionals (ig.web != null) [
+            "--web"
+            "${ig.web}"
+          ]
+          ++ lib.optional ig.plaintextLan "--plaintext-lan"
+        );
+        Restart = "on-failure";
+        RestartSec = 5;
+      };
+      Install.WantedBy = [ "default.target" ];
+    };
   };
 }
