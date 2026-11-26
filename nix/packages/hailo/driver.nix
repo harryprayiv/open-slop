@@ -56,6 +56,8 @@
 # hailo1x_pci.ko, NOT hailo_pci.ko. boot.kernelModules in
 # nix/modules/hailo.nix must match.
 #
+# hailo1x_pci.ko.cer beside it. See MODULE SIGNING below.
+#
 # Plus 51-hailo-udev.rules, shipped in the 5.1.1 source tree at
 # linux/pcie/. It sets MODE="0666" on SUBSYSTEM=="hailo_chardev". Without it
 # the node is root-only and hailo-ollama, which does not run as root, cannot
@@ -63,6 +65,29 @@
 #
 # NOTE: 5.3.0 ships no rules file and renames the class to "hailo1x", so a
 # future bump has to write the rule rather than install it.
+#
+# ============================================================================
+# MODULE SIGNING: EVERY MODULE NEEDS A .ko.cer SINCE NOVEMBER 2026 NIXPKGS
+# ============================================================================
+#
+# nixpkgs signs every kernel module with kmodigest, which replaces the .ko
+# with a signed copy and writes a DER certificate to <module>.ko.cer. The
+# kernel's own modules get this through `cmd_sign` in kernel.makeFlags during
+# `make modules_install`. pkgs.aggregateModules, which builds the
+# <kernel>-modules tree NixOS boots from, then concatenates the .ko.cer of
+# every module that is not the kernel's own into modules.cer, and fails with
+#
+#   cat: extra/hailo1x_pci.ko.cer: No such file or directory
+#
+# when one is missing. This derivation installs by hand rather than through
+# modules_install, so it calls kmodigest itself. Signing has to happen before
+# compression; nothing in installPhase compresses, so signing in the build
+# tree and installing both files is correct.
+#
+# The certificate is only trusted if something inserts modules.cer into the
+# kernel image (linuxPackages.rebuildImage). Without that the module loads
+# exactly as an unsigned one did before: the kernel logs a missing-key
+# warning and taints itself. MODULE_SIG_FORCE is not set, so it still loads.
 #
 # ============================================================================
 # THE KERNEL IS A PARAMETER
@@ -83,6 +108,7 @@
   lib,
   fetchFromGitHub,
   kernel,
+  kmodigest,
 }:
 stdenv.mkDerivation rec {
   pname = "hailo-pcie-driver";
@@ -95,7 +121,7 @@ stdenv.mkDerivation rec {
     hash = "sha256-fPLyDTuOxFDOj6Sj1jVAQ+GpQyXSmMma05Rw1PwzmIc=";
   };
 
-  nativeBuildInputs = kernel.moduleBuildDependencies;
+  nativeBuildInputs = kernel.moduleBuildDependencies ++ [ kmodigest ];
 
   # NO sourceRoot = "linux/pcie". The Makefile there reaches up into
   # ../../common, ../vdma and ../utils for most of its sources, and with the
@@ -116,8 +142,15 @@ stdenv.mkDerivation rec {
   installPhase = ''
     runHook preInstall
 
+    # Signs linux/pcie/hailo1x_pci.ko in place and writes
+    # linux/pcie/hailo1x_pci.ko.cer. See MODULE SIGNING above.
+    kmodigest linux/pcie/hailo1x_pci.ko
+
     install -D -m444 linux/pcie/hailo1x_pci.ko \
       $out/lib/modules/${kernel.modDirVersion}/extra/hailo1x_pci.ko
+
+    install -D -m444 linux/pcie/hailo1x_pci.ko.cer \
+      $out/lib/modules/${kernel.modDirVersion}/extra/hailo1x_pci.ko.cer
 
     # services.udev.packages looks in lib/udev/rules.d.
     install -D -m444 linux/pcie/51-hailo-udev.rules \
@@ -136,4 +169,3 @@ stdenv.mkDerivation rec {
     ];
   };
 }
-
